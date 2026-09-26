@@ -201,24 +201,26 @@ private struct DeviceSidebar: View {
 
             Spacer(minLength: 0)
 
-            VStack(alignment: .leading, spacing: UI.Space.xxs) {
-                Text("Send Files")
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(.white)
-                Text("or drop them anywhere")
-                    .font(UI.Text.caption)
-                    .foregroundStyle(.white.opacity(0.8))
+            // Magnetic glass send button: real Liquid Glass, and it leans a
+            // few points toward the cursor while tracked, snapping back on
+            // exit. The physics is feedback, not decoration.
+            MagneticGlassButton {
+                model.chooseAndSend()
+            } label: {
+                VStack(alignment: .leading, spacing: UI.Space.xxs) {
+                    Text("Send Files")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.primary)
+                    Text("or drop them anywhere")
+                        .font(UI.Text.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, UI.Space.s)
+                .padding(.vertical, UI.Space.s)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, UI.Space.s)
-            .padding(.vertical, UI.Space.s)
-            .background(
-                RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous)
-                    .fill(Color.accentColor.opacity(model.selectedPeer == nil ? 0.45 : 1.0)),
-            )
-            .contentShape(RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous))
-            .onTapGesture { model.chooseAndSend() }
             .disabled(model.selectedPeer == nil)
+            .opacity(model.selectedPeer == nil ? 0.55 : 1)
             .help(model.selectedPeer == nil ? "No device to send to yet" : "Send files or folders")
         }
         .padding(UI.Space.s)
@@ -663,10 +665,12 @@ private struct Inspector: View {
 
 // MARK: - Status bar
 
-/// One line at the bottom: what the app is doing, what it is capable of. Drawn
-/// on the scene, no material of its own.
+/// One line at the bottom: what the app is doing, what it is capable of. The
+/// right side carries the footer credit and the one honest way to support the
+/// work, because both belong where the eye already goes.
 private struct StatusBar: View {
     var model: AppModel
+    @State private var hoverCoffee = false
 
     var body: some View {
         HStack(spacing: UI.Space.xs) {
@@ -694,6 +698,36 @@ private struct StatusBar: View {
                 .help(model.usbLaneReady
                       ? "The USB cable is acting as a second lane"
                       : "Only the Wi-Fi lane is up")
+
+            Text("·")
+                .foregroundStyle(.tertiary)
+
+            Text("Made with love by Lakshya")
+                .font(UI.Text.caption)
+                .foregroundStyle(.secondary)
+
+            Text("·")
+                .foregroundStyle(.tertiary)
+
+            Link(destination: URL(string: "https://buymeacoffee.com/lakshyaverse")!) {
+                HStack(spacing: 4) {
+                    Image(systemName: "cup.and.saucer.fill")
+                        .font(.system(size: 10, weight: .medium))
+                    Text("Buy me a coffee")
+                        .font(UI.Text.caption)
+                }
+                .foregroundStyle(hoverCoffee ? Color.primary : Color.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background {
+                    if hoverCoffee {
+                        Capsule().fill(.white.opacity(0.14))
+                    }
+                }
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .onHover { hoverCoffee = $0 }
         }
         .padding(.horizontal, UI.Space.m)
         .padding(.vertical, UI.Space.xs)
@@ -703,6 +737,65 @@ private struct StatusBar: View {
         if model.activeTransfer != nil { return .accentColor }
         if model.receiverReady { return Color(nsColor: .systemGreen) }
         return .secondary
+    }
+}
+
+// MARK: - Liquid Glass button + magnetic feel
+
+/// A button on real system Liquid Glass. On macOS 26+ the label is wrapped in
+/// a GlassEffectContainer with `.buttonStyle(.glass)` chrome so the material
+/// refracts the scene behind it; earlier systems get the frosted fallback.
+struct MagneticGlassButton<Action: View>: View {
+    let action: () -> Void
+    @ViewBuilder let label: () -> Action
+
+    @State private var hover = false
+    @State private var lean: CGSize = .zero
+
+    var body: some View {
+        Group {
+            if #available(macOS 26.0, *) {
+                glass(inner)
+            } else {
+                inner
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous)
+                            .strokeBorder(.white.opacity(0.3), lineWidth: 1)
+                    }
+            }
+        }
+        .scaleEffect(hover ? 1.02 : 1)
+        .offset(lean)
+        .onHover { hovering in
+            hover = hovering
+            // Lean subtly upward while hovered; springs snap it back on exit.
+            lean = hovering ? CGSize(width: 0, height: -2) : .zero
+        }
+        .animation(.spring(response: 0.3, dampingFraction: 0.7), value: hover)
+        .animation(.spring(response: 0.25, dampingFraction: 0.75), value: lean)
+        .onTapGesture(perform: action)
+    }
+
+    @available(macOS 26.0, *)
+    @ViewBuilder
+    private func glass<Content: View>(_ content: Content) -> some View {
+        GlassEffectContainer {
+            content
+                .glassEffect(.regular.interactive(), in: .rect(cornerRadius: UI.Radius.control, style: .continuous))
+        }
+    }
+
+    private var inner: some View {
+        label()
+            .contentShape(RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous))
+    }
+}
+
+private extension CGSize {
+    /// Clamp both axes so the lean stays subtle.
+    func clamped(to limit: CGFloat) -> CGSize {
+        CGSize(width: min(max(width, -limit), limit), height: min(max(height, -limit), limit))
     }
 }
 

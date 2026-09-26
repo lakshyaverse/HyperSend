@@ -135,28 +135,45 @@ final class BeaconBroadcaster {
         addr.sin_addr.s_addr = INADDR_BROADCAST
         addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
 
+        // Global 255.255.255.255 is filtered by many hotspots and APs; a
+        // subnet-directed broadcast (a.b.c.255) usually survives. Recompute
+        // periodically so a network change is picked up mid-session.
+        var directed = directedBroadcastAddresses()
+        var ticks = 0
+
         while !stopped {
-            body.withUnsafeBytes { raw in
-                _ = withUnsafePointer(to: &addr) { p in
-                    p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                        Darwin.sendto(fd, raw.baseAddress, raw.count, 0, sa,
-                                      socklen_t(MemoryLayout<sockaddr_in>.size))
-                    }
-                }
-            }
+            var targets: [UInt32] = [INADDR_BROADCAST] + directed
             // Loopback copy so two instances on one Mac can still see each
             // other (useful for testing the engine against itself).
-            var local = addr
-            local.sin_addr.s_addr = inet_addr("127.0.0.1")
-            body.withUnsafeBytes { raw in
-                _ = withUnsafePointer(to: &local) { p in
-                    p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                        Darwin.sendto(fd, raw.baseAddress, raw.count, 0, sa,
-                                      socklen_t(MemoryLayout<sockaddr_in>.size))
+            targets.append(UInt32(INADDR_LOOPBACK).bigEndian)
+
+            for target in targets {
+                addr.sin_addr.s_addr = target
+                body.withUnsafeBytes { raw in
+                    _ = withUnsafePointer(to: &addr) { p in
+                        p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                            Darwin.sendto(fd, raw.baseAddress, raw.count, 0, sa,
+                                          socklen_t(MemoryLayout<sockaddr_in>.size))
+                        }
                     }
                 }
             }
+
+            ticks += 1
+            if ticks % 40 == 0 { directed = directedBroadcastAddresses() }
             Thread.sleep(forTimeInterval: 0.5)
+        }
+    }
+
+    /// a.b.c.255 for every local IPv4 subnet this Mac sits on (/24 assumed;
+    /// good enough for home and hotspot networks, which is where this runs).
+    private func directedBroadcastAddresses() -> [UInt32] {
+        localIPv4Addresses().compactMap { _, address -> UInt32? in
+            var addr = in_addr()
+            guard inet_pton(AF_INET, address, &addr) == 1 else { return nil }
+            let host = CFSwapInt32BigToHost(addr.s_addr)
+            guard host != 0 else { return nil }
+            return CFSwapInt32HostToBig((host & 0xFFFF_FF00) | 0xFF)
         }
     }
 
