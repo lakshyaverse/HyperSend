@@ -84,8 +84,9 @@ process. Bisect knobs: `HS_TEST_LANES=1 HS_TEST_SOCKETS=1 ./test.sh`.
 
 ```bash
 cd mac
-./build.sh          # → HyperSend.app (~528 KB)
+./build.sh          # → HyperSend.app (Liquid Glass UI, macOS 26+)
 ./build.sh run      # build and launch
+./build.sh dmg      # build, then package HyperSend.dmg
 ```
 
 The window launches, finds peers on the LAN, and accepts drag-and-drop. It also runs

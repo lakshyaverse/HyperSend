@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
-# Builds HyperSend.app from Sources/ using the Command Line Tools only —
-# no Xcode project, no package manager, no dependencies.
+# Builds HyperSend.app from Sources/ using the Xcode toolchain (via xcrun) —
+# no Xcode project file, no package manager, no dependencies.
 #
-#   ./build.sh          debug-ish build into ./HyperSend.app
-#   ./build.sh release  optimised build
-#   ./build.sh run      build, then launch
+#   ./build.sh           release build into ./HyperSend.app
+#   ./build.sh debug     debug build
+#   ./build.sh run       build, then launch
+#   ./build.sh dmg       build, then package HyperSend.dmg
+#
+# If xcrun cannot find the Xcode toolchain it falls back to whatever swiftc is
+# on PATH (Command Line Tools), so the script still works on a CLT-only Mac.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -13,8 +17,16 @@ APP="HyperSend.app"
 BINARY="$APP/Contents/MacOS/HyperSend"
 MODE="${1:-release}"
 
+# Xcode's swiftc knows the macOS 26 SDK where the real Liquid Glass APIs live.
+if command -v xcrun >/dev/null 2>&1 && xcrun --find swiftc >/dev/null 2>&1; then
+  SWIFTC=(xcrun swiftc)
+else
+  SWIFTC=(swiftc)
+  echo "note: xcrun/swiftc not found, falling back to swiftc on PATH" >&2
+fi
+
 SWIFT_FLAGS=(-target arm64-apple-macos14.0 -framework AppKit -framework QuartzCore -framework CryptoKit)
-if [[ "$MODE" == "release" ]]; then
+if [[ "$MODE" == "release" || "$MODE" == "dmg" ]]; then
   SWIFT_FLAGS+=(-O -whole-module-optimization)
 else
   SWIFT_FLAGS+=(-Onone -g)
@@ -40,9 +52,9 @@ else
   echo "note: HyperSend.icns missing — run tools/make-icon.swift to regenerate" >&2
 fi
 
-echo "compiling $COUNT source files…"
+echo "compiling $COUNT source files with ${SWIFTC[*]}…"
 # shellcheck disable=SC2086 -- deliberately unquoted so the file list splits
-swiftc "${SWIFT_FLAGS[@]}" $SOURCES -o "$BINARY"
+"${SWIFTC[@]}" "${SWIFT_FLAGS[@]}" $SOURCES -o "$BINARY"
 
 # Ad-hoc signature: enough for local runs and for the local-network prompt to
 # behave, and it keeps Gatekeeper quiet on this machine.
@@ -56,4 +68,15 @@ if [[ "$MODE" == "run" ]]; then
   sleep 0.3
   open "$APP"
   echo "launched"
+fi
+
+if [[ "$MODE" == "dmg" ]]; then
+  DMG="HyperSend.dmg"
+  STAGING=$(mktemp -d)
+  trap 'rm -rf "$STAGING"' EXIT
+  cp -R "$APP" "$STAGING/"
+  ln -s /Applications "$STAGING/Applications"
+  rm -f "$DMG"
+  hdiutil create -volname "HyperSend" -srcfolder "$STAGING" -ov -format UDZO "$DMG" >/dev/null
+  echo "packaged $DMG ($(du -h "$DMG" | cut -f1))"
 fi
