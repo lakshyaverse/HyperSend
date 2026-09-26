@@ -495,13 +495,17 @@ final class AppModel {
         sendQueue.async { [weak self] in
             guard let self else { return }
             let engine = SendEngine()
+            // Settings owns this knob: read at send time, not at launch, so
+            // moving the stepper takes effect on the next send. (`integer(0)`
+            // would read 0 before defaults are registered, so read optional.)
+            let socketsPerLane = max(1, UserDefaults.standard.object(forKey: Pref.socketsPerLane) as? Int ?? 2)
             do {
                 let summary = try engine.send(
                     files: files,
                     paths: paths,
                     primary: lanes[0],
                     extraLanes: Array(lanes.dropFirst()),
-                    socketsPerLane: 2,
+                    socketsPerLane: socketsPerLane,
                     progress: { progress in
                         // The engine reports a cumulative byte count across the
                         // whole batch, so subtract everything already finished

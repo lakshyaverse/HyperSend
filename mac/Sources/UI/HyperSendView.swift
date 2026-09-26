@@ -755,9 +755,9 @@ struct MagneticGlassButton<Action: View>: View {
     var body: some View {
         Group {
             if #available(macOS 26.0, *) {
-                glass(inner)
+                glass(button)
             } else {
-                inner
+                button
                     .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous))
                     .overlay {
                         RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous)
@@ -774,7 +774,6 @@ struct MagneticGlassButton<Action: View>: View {
         }
         .animation(.spring(response: 0.3, dampingFraction: 0.7), value: hover)
         .animation(.spring(response: 0.25, dampingFraction: 0.75), value: lean)
-        .onTapGesture(perform: action)
     }
 
     @available(macOS 26.0, *)
@@ -786,9 +785,15 @@ struct MagneticGlassButton<Action: View>: View {
         }
     }
 
-    private var inner: some View {
-        label()
-            .contentShape(RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous))
+    /// A real `Button`, not a tap gesture: Space and Return fire it once it is
+    /// focused, `.disabled` from the caller actually stops the action, and
+    /// VoiceOver reads it as a button.
+    private var button: some View {
+        Button(action: action) {
+            label()
+                .contentShape(RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous))
+        }
+        .buttonStyle(.plain)
     }
 }
 

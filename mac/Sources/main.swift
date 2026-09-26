@@ -301,6 +301,50 @@ enum MenuBuilder {
         ))
         fileItem.submenu = fileMenu
 
+        // Edit, with its actions pointing at the responder chain: without it
+        // the Add-Device field and the device-name field have no ⌘C/⌘V/⌘X, and
+        // the app fails the basic macOS text-editing contract.
+        let editItem = NSMenuItem()
+        main.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "Z")
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+
+        // A standard Window menu: miniaturise, zoom, and the window list, so
+        // ⌘M and the ⌘` cycle behave the way every other app does.
+        let windowItem = NSMenuItem()
+        main.addItem(windowItem)
+        let windowMenu = NSMenu(title: "Window")
+        windowMenu.addItem(withTitle: "Minimise", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "Zoom", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowMenu.addItem(.separator())
+        windowItem.submenu = windowMenu
+        NSApp.windowsMenu = windowMenu
+
+        // Help doubles as a required App Review item and the escape hatch for
+        // discovery problems: two clicks to the repo, one to the log folder.
+        let helpItem = NSMenuItem()
+        main.addItem(helpItem)
+        let helpMenu = NSMenu(title: "Help")
+        helpMenu.addItem(MenuActions.shared.item(
+            "HyperSend Help", #selector(MenuActions.openHelp(_:)), "?",
+        ))
+        helpMenu.addItem(MenuActions.shared.item(
+            "Report an Issue", #selector(MenuActions.reportIssue(_:)), "",
+        ))
+        helpMenu.addItem(.separator())
+        helpMenu.addItem(MenuActions.shared.item(
+            "Show Receive Folder", #selector(MenuActions.revealFolder(_:)), "",
+        ))
+        helpItem.submenu = helpMenu
+        NSApp.helpMenu = helpMenu
+
         NSApplication.shared.mainMenu = main
     }
 }

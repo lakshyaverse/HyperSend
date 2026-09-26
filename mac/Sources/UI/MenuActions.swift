@@ -54,6 +54,14 @@ final class MenuActions: NSObject {
         SettingsWindowController.shared.present()
     }
 
+    @objc func openHelp(_ sender: Any?) {
+        NSWorkspace.shared.open(AppLinks.repository)
+    }
+
+    @objc func reportIssue(_ sender: Any?) {
+        NSWorkspace.shared.open(AppLinks.issues)
+    }
+
     @objc func showWindow(_ sender: Any?) {
         NSApp.activate(ignoringOtherApps: true)
         for window in NSApp.windows where window.title == "HyperSend" {
