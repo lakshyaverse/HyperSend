@@ -10,8 +10,6 @@ import SwiftUI
 enum Pref {
     static let launchAtLogin = "pref.launchAtLogin"
     static let appearance = "pref.appearance" // system | light | dark
-    static let liquidGlass = "pref.liquidGlass"
-    static let glassIntensity = "pref.glassIntensity"
     static let autoAccept = "pref.autoAccept"
     static let openAfterReceive = "pref.openAfterReceive"
     static let revealInFinder = "pref.revealInFinder"
@@ -26,8 +24,6 @@ enum Pref {
         UserDefaults.standard.register(defaults: [
             launchAtLogin: false,
             appearance: "system",
-            liquidGlass: true,
-            glassIntensity: GlassIntensity.maximum.rawValue,
             autoAccept: true,
             // Off by default: opening a received file runs it with its default
             // app. Revealing it in Finder is the safe default.
