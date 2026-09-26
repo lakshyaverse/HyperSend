@@ -148,6 +148,22 @@ private struct DeviceSidebar: View {
                     )
                 Text("HyperSend")
                     .font(UI.Text.section)
+
+                Spacer(minLength: 0)
+
+                // Settings live in this window's face, not only in the menu
+                // bar: nobody finds ⌘, on their own.
+                Button {
+                    MenuActions.shared.openSettings(nil)
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 26, height: 26)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .help("Settings")
             }
             .padding(.top, 2)
 

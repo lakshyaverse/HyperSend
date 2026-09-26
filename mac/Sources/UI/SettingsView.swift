@@ -412,7 +412,7 @@ struct SettingsView: View {
             } header: {
                 Text("HyperSend")
             } footer: {
-                Text("Multipath transfer between a Mac and an Android phone. Every byte is SHA-256 verified; nothing goes through a server.")
+                Text("Multipath transfer between a Mac and an Android phone. Every byte is SHA-256 verified; nothing goes through a server.\n\nMade with love by Lakshya.")
             }
 
             Section {

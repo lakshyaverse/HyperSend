@@ -6,6 +6,10 @@ A Mac app that sends files to Android over **Wi-Fi and the USB cable at the
 same time**, and checks every byte with SHA-256. No accounts, no cloud, no
 dependencies.
 
+**Download:** [HyperSend.dmg from Releases](https://github.com/lakshyaverse/HyperSend/releases/latest)
+— open it, drag the app to Applications, done. No Xcode, no terminal, no
+dependencies.
+
 <p align="center"><img src="assets/screenshot.png" width="85%" alt="HyperSend"/></p>
 
 ## How it works
@@ -50,6 +54,7 @@ sends, back-to-back sessions, and rejection of path traversal.
 
 ## Build
 
+Only if you want to touch the code. Otherwise, take the DMG from Releases.
 Open `mac/HyperSend.xcodeproj` in Xcode, or use the script, which builds the
 same project with `xcodebuild`:
 
@@ -97,3 +102,7 @@ once, and the engine is small enough to read in an afternoon. Start with
 ## License
 
 MIT.
+
+---
+
+<p align="center">Made with :heart: by <a href="https://github.com/lakshyaverse">Lakshya</a></p>
