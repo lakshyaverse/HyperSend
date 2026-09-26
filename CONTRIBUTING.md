@@ -17,12 +17,12 @@ in all three plus the test oracle, together, in one PR.
 ```bash
 git clone https://github.com/lakshyaverse/HyperSend.git
 cd HyperSend/mac
-./build.sh run     # build with xcrun swiftc and launch
+./build.sh run     # xcodebuild, then launch
 ./test.sh          # 42 end-to-end checks, ~seconds, no phone needed
 ```
 
-No Xcode project to open, no packages to fetch. `swiftc` via `xcrun` and the
-macOS SDK are the entire toolchain.
+There is a real Xcode project (`HyperSend.xcodeproj`) if you want Xcode's
+deployment pane.
 
 ## Before you open a PR
 

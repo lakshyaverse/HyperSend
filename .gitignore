@@ -27,3 +27,7 @@ android/local.properties
 # ── Local tooling / preview artifacts ────────────────────────────────────────
 .preview/
 .freebuff/
+
+# ── Xcode build products ────────────────────────────────────────────────────
+mac/build/
+mac/*.dmg
