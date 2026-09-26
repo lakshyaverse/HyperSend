@@ -12,6 +12,21 @@ dependencies.
 
 <p align="center"><img src="assets/screenshot.png" width="85%" alt="HyperSend"/></p>
 
+### The glass, up close
+
+<p align="center">
+  <img src="assets/glass-hero.png" width="32%" alt=""/>
+  <img src="assets/glass-selection.png" width="32%" alt=""/>
+  <img src="assets/glass-rim.png" width="32%" alt=""/>
+</p>
+
+Real system Liquid Glass, not a blur imitation: the drop well is `.clear`
+glass so the scene bends through it, the selected device sits on its own
+floating lens, and every panel in the window shares one
+`GlassEffectContainer` so neighbouring shapes lens as a group. Panels are
+deliberately quiet (`.regular`), controls are the ones that glow
+(`.interactive()`) — the division Apple's own guidance draws.
+
 ## How it works
 
 A file is a list of 2 MiB chunks. The sender holds one offset queue with a
