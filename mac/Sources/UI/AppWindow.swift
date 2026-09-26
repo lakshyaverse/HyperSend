@@ -7,30 +7,32 @@ import SwiftUI
 // menu bar, activation policy and lifecycle exactly as they were, so the engine,
 // the CLI modes and the menus are untouched.
 //
-// An ordinary titled window, deliberately. The previous build needed
-// `fullSizeContentView` and a transparent title bar so a NavigationSplitView
-// sidebar could run under the traffic lights; there is no sidebar now, and a
-// standard title bar is what a utility window is supposed to look like.
+// The design is the Icon Composer look: a pastel scene that runs edge to edge
+// with glass panels floating on it, so the title bar is folded away and the
+// scene extends under the traffic lights. `fullSizeContentView` with a hidden
+// title achieves that; the window stays draggable via its title bar area and
+// fully resizable.
 final class AppWindowController: NSWindowController {
     convenience init() {
         let hosting = NSHostingView(rootView: HyperSendView(model: .shared))
 
-        // A utility window, sized like one. It was 1080x700 for a three-column
-        // dashboard; a single column of devices and transfers needs no more
-        // width than a long file name.
+        // The reference window is a wide three-column layout: sidebar, hero,
+        // inspector. 900x600 is its comfortable resting size.
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 660, height: 520),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            contentRect: NSRect(x: 0, y: 0, width: 900, height: 600),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false,
         )
         window.title = "HyperSend"
-        window.minSize = NSSize(width: 560, height: 440)
+        window.titlebarAppearsTransparent = true
+        // The title text stays out of the way; the scene provides the identity.
+        window.titleVisibility = .hidden
+        window.minSize = NSSize(width: 760, height: 480)
         window.contentView = hosting
-        // A new name on purpose. The previous layout saved a 1080x700 frame
-        // under "HyperSendMain", and restoring it would drop this one-column
-        // design into a window twice the size it was drawn for.
-        window.setFrameAutosaveName("HyperSendMain2")
+        // Fresh autosave name: the previous layouts saved frames under other
+        // keys, and restoring one would mis-size this three-column design.
+        window.setFrameAutosaveName("HyperSendScene")
 
         LaunchTrace.mark("AppWindow: built")
         self.init(window: window)
