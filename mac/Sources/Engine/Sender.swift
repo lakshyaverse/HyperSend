@@ -241,7 +241,10 @@ final class SendEngine {
     }
 
     private func awaitOfferResponse(_ control: TCPConnection, transferId: String, size: Int64) throws -> Int64 {
-        let deadline = Date().addingTimeInterval(30)
+        // Generous on purpose: a receiver with automatic acceptance turned off
+        // puts this offer in front of a *person*, and the answer takes as long
+        // as a person takes. Mirrored by AppModel.acceptPromptTimeout.
+        let deadline = Date().addingTimeInterval(120)
         while true {
             let remaining = deadline.timeIntervalSinceNow
             if remaining <= 0 { throw HyperSendError.timedOut("no offer-response") }

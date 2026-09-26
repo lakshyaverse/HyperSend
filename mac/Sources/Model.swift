@@ -133,6 +133,17 @@ final class AppModel {
     /// never register defaults, on the accept-by-default path.)
     var autoAccept: Bool = UserDefaults.standard.object(forKey: Pref.autoAccept) as? Bool ?? true
 
+    /// Read at delivery time, like `autoAccept`, so flipping a switch takes
+    /// effect on the next file instead of the next launch.
+    ///
+    /// Both of these were declared, rendered in Settings, and read by nothing:
+    /// the app always revealed the file whatever the toggles said.
+    var revealInFinder: Bool = UserDefaults.standard.object(forKey: Pref.revealInFinder) as? Bool ?? true
+    /// Off by default. "Open" launches the file with its default app, which
+    /// means a `.command` or `.app` someone sends you is one click from
+    /// running; revealing it in Finder is enough unless you ask for more.
+    var openAfterReceive: Bool = UserDefaults.standard.object(forKey: Pref.openAfterReceive) as? Bool ?? false
+
     // Built in start(), not here: the broadcast name must be the *same* string
     // as `deviceName`, otherwise our own beacon no longer matches the self
     // filter below and the app lists this Mac as a nearby device.
@@ -230,9 +241,18 @@ final class AppModel {
         engine.updateHooks(ReceiveEngine.Hooks(
             accept: { [weak self] path, size in
                 guard let self else { return false }
-                let accept = self.autoAccept
-                self.log(accept ? "incoming: \(path) · \(formattedBytes(size))" : "declined \(path)")
-                return accept
+                if self.autoAccept {
+                    self.log("incoming: \(path) · \(formattedBytes(size))")
+                    return true
+                }
+                // With automatic acceptance off the file is *offered*, not
+                // refused: ask, and park this session thread until the user
+                // answers. The sender's offer window outlasts this prompt (see
+                // SendEngine.awaitOfferResponse), so a slow answer still
+                // arrives as a decision rather than a failure.
+                let answer = self.askToAccept(path: path, size: size)
+                self.log(answer ? "accepted \(path)" : "declined \(path)")
+                return answer
             },
             progress: { [weak self] name, done, total in
                 self?.updateReceiveProgress(name: name, done: done, total: total)
@@ -242,7 +262,13 @@ final class AppModel {
                 self.receivedCount += 1
                 self.log("saved \(file.name) → \(self.receiveDirectory.path)")
                 self.finishReceive(file)
-                NSWorkspace.shared.activateFileViewerSelecting([URL(fileURLWithPath: file.path)])
+                let received = URL(fileURLWithPath: file.path)
+                if self.revealInFinder {
+                    NSWorkspace.shared.activateFileViewerSelecting([received])
+                }
+                if self.openAfterReceive {
+                    NSWorkspace.shared.open(received)
+                }
                 self.notify()
             },
             log: { [weak self] message in self?.log(message) },
@@ -333,8 +359,34 @@ final class AppModel {
         log(message)
     }
 
-    func addPeerManually(host: String, name: String? = nil) {
-        guard !host.isEmpty else { return }
+    /// True for an IPv4 literal or a plausible host name.
+    ///
+    /// Deliberately strict about shapes we could never connect to: a typo used
+    /// to become a peer that sat in the sidebar looking real and never worked.
+    static func isConnectableHost(_ input: String) -> Bool {
+        let host = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty, host.count <= 253 else { return false }
+
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        if octets.count == 4, octets.allSatisfy({ octet in
+            octet.allSatisfy { $0.isASCII && $0.isNumber } && (Int(octet).map { (0 ... 255).contains($0) } ?? false)
+        }) {
+            return true
+        }
+
+        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-.")
+        guard host.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
+        return host.split(separator: ".", omittingEmptySubsequences: false).allSatisfy { label in
+            !label.isEmpty && label.count <= 63 && !label.hasPrefix("-") && !label.hasSuffix("-")
+        }
+    }
+
+    /// Adds a manually entered device. Returns false when the address could not
+    /// be reached by any amount of trying, so the caller can say why instead of
+    /// silently listing it.
+    @discardableResult
+    func addPeerManually(host: String, name: String? = nil) -> Bool {
+        guard Self.isConnectableHost(host) else { return false }
         if let index = peers.firstIndex(where: { $0.host == host }) {
             peers[index].lastSeen = Date()
         } else {
@@ -349,6 +401,7 @@ final class AppModel {
         selectedPeerKey = "\(host):\(Proto.controlPort)"
         log("added device \(host) manually")
         notify()
+        return true
     }
 
     private func expirePeers() {
@@ -513,6 +566,41 @@ final class AppModel {
     }
 
     // MARK: - Receiving
+
+    /// How long the receiver waits for a person to answer an incoming offer.
+    /// Deliberately shorter than the sender's offer-response window so the
+    /// decline reaches it as a decision instead of timing it out.
+    private static let acceptPromptTimeout: TimeInterval = 100
+
+    /// Shows the incoming-file prompt on the main thread and waits for it.
+    /// Called from a receiver session thread, so the work is hopped to main and
+    /// this thread parks on a semaphore until it is answered (or times out).
+    private func askToAccept(path: String, size: Int64) -> Bool {
+        func present() -> Bool {
+            let alert = NSAlert()
+            alert.messageText = "Incoming file"
+            alert.informativeText = "\(path)\n\(formattedBytes(size))"
+            alert.addButton(withTitle: "Accept")
+            alert.addButton(withTitle: "Decline")
+            alert.alertStyle = .informational
+            NSApp.activate(ignoringOtherApps: true)
+            return alert.runModal() == .alertFirstButtonReturn
+        }
+
+        if Thread.isMainThread { return present() }
+
+        let semaphore = DispatchSemaphore(value: 0)
+        var answer = false
+        DispatchQueue.main.async {
+            answer = present()
+            semaphore.signal()
+        }
+        if semaphore.wait(timeout: .now() + Self.acceptPromptTimeout) == .timedOut {
+            log("no answer for \(path) — declined")
+            return false
+        }
+        return answer
+    }
 
     private func updateReceiveProgress(name: String, done: Int64, total: Int64) {
         DispatchQueue.main.async { [weak self] in

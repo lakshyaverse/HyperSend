@@ -9,8 +9,18 @@ import Foundation
 //   HS_LAUNCH_TRACE=1 ./HyperSend.app/Contents/MacOS/HyperSend
 //   tail -f /tmp/hypersend-launch.log
 //
-// The design tokens (spacing, colours, radii) now live in the SwiftUI `UI` enum
-// in Sources/UI/HyperSendView.swift, where the views can read them directly.
+// The design tokens (type, icons, radii, spacing) live in the SwiftUI `UI` enum
+// in Sources/UI/Tokens.swift, where the views can read them directly.
+/// Canonical outbound links.
+///
+/// One place to change, so a placeholder host can never be shipped in an About
+/// screen again — the previous build had `https://github.com` as its feedback
+/// link, which looks finished and goes nowhere.
+enum AppLinks {
+    static let repository = URL(string: "https://github.com/lakshyaverse/HyperSend")!
+    static let issues = repository.appendingPathComponent("issues")
+}
+
 enum LaunchTrace {
     static let enabled = ProcessInfo.processInfo.environment["HS_LAUNCH_TRACE"] == "1"
     private static let path = "/tmp/hypersend-launch.log"

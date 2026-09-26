@@ -182,10 +182,17 @@ struct SettingsView: View {
                 Text("More sockets per lane help on a lossy link; two is plenty on a healthy one.")
             }
 
-            Section("Measured on this Mac") {
+            // These are the developer's figures, not the user's. Labelling them
+            // "Measured on this Mac" made a claim about their hardware that was
+            // simply untrue on any other machine.
+            Section {
                 LabeledContent("Bonded result") { Value("314.6 MB in 4.6 s · 68.8 MB/s") }
                 LabeledContent("Wi-Fi lane") { Value("36.2 MB/s") }
                 LabeledContent("USB cable lane") { Value("32.6 MB/s") }
+            } header: {
+                Text("Reference throughput")
+            } footer: {
+                Text("Measured by the developer on an Apple Silicon Mac over a 480 Mbps hotspot to a CMF Phone 1. Your numbers depend on your radio and cable — the real rate is reported while a transfer runs.")
             }
         }
         .formStyle(.grouped)
@@ -248,7 +255,7 @@ struct SettingsView: View {
     // MARK: Receive
 
     @AppStorage(Pref.autoAccept) private var autoAccept = true
-    @AppStorage(Pref.openAfterReceive) private var openAfterReceive = true
+    @AppStorage(Pref.openAfterReceive) private var openAfterReceive = false
     @AppStorage(Pref.revealInFinder) private var revealInFinder = true
 
     private var receiveSection: some View {
@@ -260,14 +267,23 @@ struct SettingsView: View {
                         .toggleStyle(.switch)
                         .onChange(of: autoAccept) { _, value in AppModel.shared.autoAccept = value }
                 }
+                // Both of these are read by the receiver when a file lands, so
+                // the model has to be told as well as UserDefaults — otherwise
+                // the switch moves and nothing changes until the next launch.
                 LabeledContent("Open after receiving") {
-                    Toggle("", isOn: $openAfterReceive).labelsHidden().toggleStyle(.switch)
+                    Toggle("", isOn: $openAfterReceive)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .onChange(of: openAfterReceive) { _, value in AppModel.shared.openAfterReceive = value }
                 }
                 LabeledContent("Reveal in Finder") {
-                    Toggle("", isOn: $revealInFinder).labelsHidden().toggleStyle(.switch)
+                    Toggle("", isOn: $revealInFinder)
+                        .labelsHidden()
+                        .toggleStyle(.switch)
+                        .onChange(of: revealInFinder) { _, value in AppModel.shared.revealInFinder = value }
                 }
             } footer: {
-                Text("With automatic acceptance off, every incoming file is offered to you first. Transfers are always SHA-256 verified before a file is written into place.")
+                Text("With automatic acceptance off, every incoming file is offered to you first. Transfers are always SHA-256 verified before a file is written into place. Opening a received file launches it with its default app, so it is off by default — leave it off unless you trust the sender.")
             }
 
             Section("Status") {
@@ -378,6 +394,15 @@ struct SettingsView: View {
     }
 
     private func resetPreferences() {
+        // Destructive and one click away, so it asks first.
+        let alert = NSAlert()
+        alert.messageText = "Reset all preferences?"
+        alert.informativeText = "Device name, receive folder, appearance, glass and lane settings go back to their defaults. Received files and transfers are not touched."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
         let domain = Bundle.main.bundleIdentifier ?? "com.hypersend.mac"
         UserDefaults.standard.removePersistentDomain(forName: domain)
         Pref.registerDefaults()
@@ -394,6 +419,7 @@ struct SettingsView: View {
                 LabeledContent("Version") { Value(Self.versionString) }
                 LabeledContent("Protocol") { Value("v\(Proto.version)") }
                 LabeledContent("Licence") { Value("MIT") }
+                LabeledContent("Source") { Value(AppLinks.repository.absoluteString) }
             } header: {
                 Text("HyperSend")
             } footer: {
@@ -402,9 +428,14 @@ struct SettingsView: View {
 
             Section {
                 Button {
-                    NSWorkspace.shared.open(URL(string: "https://github.com")!)
+                    NSWorkspace.shared.open(AppLinks.issues)
                 } label: {
-                    Label("Send feedback", systemImage: "bubble.left")
+                    Label("Report an issue", systemImage: "bubble.left")
+                }
+                Button {
+                    NSWorkspace.shared.open(AppLinks.repository)
+                } label: {
+                    Label("View source on GitHub", systemImage: "chevron.left.forwardslash.chevron.right")
                 }
             }
         }
