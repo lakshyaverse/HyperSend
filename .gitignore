@@ -1,0 +1,29 @@
+# ── Node ─────────────────────────────────────────────────────────────────────
+node_modules/
+dist/
+received/
+*.log
+
+# ── macOS junk ───────────────────────────────────────────────────────────────
+.DS_Store
+._*
+
+# ── Built app bundles (rebuild with mac/build.sh) ────────────────────────────
+*.app/
+
+# ── SwiftPM / Xcode build products ───────────────────────────────────────────
+mac/.build/
+mac/.swiftpm/
+
+# ── Android / Gradle ─────────────────────────────────────────────────────────
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/local.properties
+*.apk
+*.aab
+
+# ── Local tooling / preview artifacts ────────────────────────────────────────
+.preview/
+.freebuff/
