@@ -94,7 +94,6 @@ struct SettingsView: View {
 
     @AppStorage(Pref.launchAtLogin) private var launchAtLogin = false
     @AppStorage(Pref.appearance) private var appearance = "system"
-    @AppStorage(Pref.glassIntensity) private var glassIntensity = GlassIntensity.maximum.rawValue
     @AppStorage(Pref.deviceName) private var deviceName = ""
 
     private var generalSection: some View {
@@ -127,16 +126,6 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 240)
                     .onChange(of: appearance) { _, value in AppearancePref.apply(value) }
-                }
-                LabeledContent("Liquid Glass") {
-                    Picker("", selection: $glassIntensity) {
-                        ForEach(GlassIntensity.allCases) { level in
-                            Text(level.label).tag(level.rawValue)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 240)
                 }
                 LabeledContent("Device name") {
                     TextField(AppModel.shared.deviceName, text: $deviceName)
