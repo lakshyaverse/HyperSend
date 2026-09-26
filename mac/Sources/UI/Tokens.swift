@@ -40,11 +40,16 @@ enum Scene {
     /// Warm accents that break the blue so the scene reads as weather, not
     /// wallpaper. The white bloom exists for the glass: a bright region the
     /// lensing has something to bend.
+    ///
+    /// Kept deliberately dim: the system glass lenses whatever sits behind a
+    /// panel, and a bright source directly behind glass caustics into a band
+    /// parallel to the rim — a straight bright line across the panel. Soft
+    /// sources make that caustic read as rim glow instead.
     static let warmStops: [(Color, CGFloat, CGRect)] = [
-        (Color(red: 1.00, green: 0.88, blue: 0.60), 0.55, CGRect(x: 0.05, y: 0.02, width: 0.55, height: 0.42)),
-        (Color(red: 0.98, green: 0.72, blue: 0.66), 0.45, CGRect(x: 0.55, y: 0.30, width: 0.45, height: 0.50)),
-        (Color(red: 0.86, green: 0.85, blue: 1.00), 0.45, CGRect(x: -0.10, y: 0.45, width: 0.50, height: 0.55)),
-        (Color.white, 0.34, CGRect(x: 0.22, y: 0.04, width: 0.56, height: 0.44)),
+        (Color(red: 1.00, green: 0.88, blue: 0.60), 0.50, CGRect(x: 0.05, y: 0.02, width: 0.55, height: 0.42)),
+        (Color(red: 0.98, green: 0.72, blue: 0.66), 0.30, CGRect(x: 0.55, y: 0.30, width: 0.45, height: 0.50)),
+        (Color(red: 0.86, green: 0.85, blue: 1.00), 0.30, CGRect(x: -0.10, y: 0.45, width: 0.50, height: 0.55)),
+        (Color.white, 0.22, CGRect(x: 0.22, y: 0.04, width: 0.56, height: 0.40)),
     ]
 
     /// Dark-mode sky: same composition, night shift.
@@ -56,10 +61,10 @@ enum Scene {
     ]
 
     static let warmStopsDark: [(Color, CGFloat, CGRect)] = [
-        (Color(red: 0.16, green: 0.22, blue: 0.42), 0.35, CGRect(x: 0.05, y: 0.02, width: 0.55, height: 0.42)),
-        (Color(red: 0.22, green: 0.16, blue: 0.34), 0.30, CGRect(x: 0.55, y: 0.30, width: 0.45, height: 0.50)),
-        (Color(red: 0.13, green: 0.17, blue: 0.35), 0.30, CGRect(x: -0.10, y: 0.45, width: 0.50, height: 0.55)),
-        (Color.white, 0.10, CGRect(x: 0.22, y: 0.04, width: 0.56, height: 0.44)),
+        (Color(red: 0.16, green: 0.22, blue: 0.42), 0.28, CGRect(x: 0.05, y: 0.02, width: 0.55, height: 0.42)),
+        (Color(red: 0.22, green: 0.16, blue: 0.34), 0.22, CGRect(x: 0.55, y: 0.30, width: 0.45, height: 0.50)),
+        (Color(red: 0.13, green: 0.17, blue: 0.35), 0.22, CGRect(x: -0.10, y: 0.45, width: 0.50, height: 0.55)),
+        (Color.white, 0.08, CGRect(x: 0.22, y: 0.04, width: 0.56, height: 0.40)),
     ]
 }
 
