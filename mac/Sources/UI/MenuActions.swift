@@ -19,16 +19,30 @@ final class MenuActions: NSObject {
     }
 
     @objc func addDevice(_ sender: Any?) {
+        presentAddDevice(problem: nil)
+    }
+
+    /// Asks for an address, and on nonsense asks again *saying why*. The first
+    /// version accepted any non-empty string and put an unreachable device in
+    /// the sidebar with no explanation.
+    private func presentAddDevice(problem: String?) {
         let alert = NSAlert()
         alert.messageText = "Add a device"
-        alert.informativeText = "Enter the other device's IP address. Use this when the beacon cannot reach it."
+        let instructions = "Enter the other device's IP address. Use this when the beacon cannot reach it."
+        alert.informativeText = problem.map { "\($0)\n\n\(instructions)" } ?? instructions
+        alert.alertStyle = problem == nil ? .informational : .warning
         let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 220, height: 24))
         field.placeholderString = "192.168.1.20"
         alert.accessoryView = field
         alert.addButton(withTitle: "Add")
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+
         let host = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard AppModel.isConnectableHost(host) else {
+            presentAddDevice(problem: "\u{201C}\(host)\u{201D} is not an IP address or host name.")
+            return
+        }
         AppModel.shared.addPeerManually(host: host)
     }
 

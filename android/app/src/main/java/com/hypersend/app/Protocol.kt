@@ -331,7 +331,15 @@ class ReceiverEngine(
             } catch (e: Exception) {
                 // ignore
             }
+            // Clear the whole per-session readout, not just the rate. Leaving
+            // lastFileName set made the panel claim a file was still arriving
+            // after the session had ended — and because the receiving service
+            // outlives the activity, reopening the app showed that phantom
+            // transfer from the previous run.
             bytesPerSec = 0
+            lastFileName = ""
+            lastFileBytes = 0
+            lastFileTotal = 0
             onStateChange()
         }
     }

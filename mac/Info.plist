@@ -10,6 +10,8 @@
 	<string>HyperSend</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.hypersend.mac</string>
+	<key>CFBundleIconFile</key>
+	<string>HyperSend</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundlePackageType</key>

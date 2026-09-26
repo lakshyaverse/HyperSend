@@ -151,7 +151,7 @@ private struct GlassActionsCluster: View {
                 } label: {
                     Image(systemName: expanded ? "xmark" : "ellipsis")
                         .frame(width: size, height: size)
-                        .font(.system(size: 19, weight: .semibold))
+                        .font(.system(size: UI.Icon.control, weight: .semibold))
                 }
                 .buttonStyle(.glass)
                 .glassEffectID("toggle", in: namespace)
@@ -206,7 +206,7 @@ private struct CircleButton: View {
         Button(action: action) {
             Image(systemName: symbol)
                 .frame(width: size, height: size)
-                .font(.system(size: 19))
+                .font(.system(size: UI.Icon.control))
         }
         .buttonStyle(.glass)
     }
@@ -221,10 +221,10 @@ private struct PlainLaneChip: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: symbol)
-                .font(.system(size: 15))
+                .font(.system(size: UI.Icon.lane))
                 .foregroundStyle(tint)
             Text(formattedRate(rate))
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(UI.TypeScale.laneChip.monospacedDigit())
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)
@@ -295,10 +295,10 @@ private struct BondedUnion: View {
     private func chip(symbol: String, tint: Color, rate: Double, id: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: symbol)
-                .font(.system(size: 15))
+                .font(.system(size: UI.Icon.lane))
                 .foregroundStyle(tint)
             Text(formattedRate(rate))
-                .font(.system(size: 12, weight: .medium).monospacedDigit())
+                .font(UI.TypeScale.laneChip.monospacedDigit())
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 9)

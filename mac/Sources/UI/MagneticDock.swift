@@ -123,7 +123,7 @@ final class MagneticDockView: NSView {
             systemSymbolName: symbol,
             accessibilityDescription: help,
         )?
-        .withSymbolConfiguration(.init(pointSize: 19, weight: .medium))
+        .withSymbolConfiguration(.init(pointSize: UI.Icon.control, weight: .medium))
         icon.contentTintColor = .labelColor
         icon.translatesAutoresizingMaskIntoConstraints = false
 
@@ -137,8 +137,8 @@ final class MagneticDockView: NSView {
             NSLayoutConstraint.activate([
                 icon.centerXAnchor.constraint(equalTo: effect.centerXAnchor),
                 icon.centerYAnchor.constraint(equalTo: effect.centerYAnchor),
-                icon.widthAnchor.constraint(equalToConstant: 24),
-                icon.heightAnchor.constraint(equalToConstant: 24),
+                icon.widthAnchor.constraint(equalToConstant: UI.Icon.dock),
+                icon.heightAnchor.constraint(equalToConstant: UI.Icon.dock),
             ])
             return effect
         }

@@ -29,7 +29,9 @@ enum Pref {
             liquidGlass: true,
             glassIntensity: GlassIntensity.maximum.rawValue,
             autoAccept: true,
-            openAfterReceive: true,
+            // Off by default: opening a received file runs it with its default
+            // app. Revealing it in Finder is the safe default.
+            openAfterReceive: false,
             revealInFinder: true,
             socketsPerLane: 2,
             showMenuBarIcon: false,

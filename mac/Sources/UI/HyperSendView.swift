@@ -55,7 +55,7 @@ struct HyperSendView: View {
                     Image(systemName: "arrow.down.circle.fill")
                     Text("Drop to send over \(model.usbLaneReady ? "Wi-Fi + USB" : "Wi-Fi")")
                 }
-                .font(.system(size: 13, weight: .semibold))
+                .font(UI.TypeScale.emphasis)
                 .padding(.horizontal, 16)
                 .padding(.vertical, 10)
                 .floatingGlass()
@@ -171,13 +171,16 @@ private struct SidebarColumn: View {
                     Label("Receive Folder", systemImage: "folder")
                 }
                 .buttonStyle(.link)
-                Text("♥ Sponsor HyperSend")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+                // Was a plain `Text` worded like a link: it looked actionable
+                // and did nothing. Now it goes somewhere real.
+                Link(destination: AppLinks.repository) {
+                    Label("Star HyperSend on GitHub", systemImage: "star")
+                }
+                .font(.caption2)
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .glassPanel(cornerRadius: 14)
+            .glassPanel(cornerRadius: UI.Radius.row)
             .padding(.horizontal, 10)
             .padding(.bottom, 10)
         }
@@ -201,7 +204,7 @@ private struct TransfersColumn: View {
                 List(model.transfers.reversed()) { item in
                     TransferRow(item: item)
                         .padding(10)
-                        .glassPanel(cornerRadius: 14)
+                        .glassPanel(cornerRadius: UI.Radius.row)
                         .listRowInsets(EdgeInsets(top: 4, leading: 10, bottom: 4, trailing: 10))
                         .listRowSeparator(.hidden)
                         .listRowBackground(Color.clear)
@@ -220,18 +223,18 @@ private struct TransferRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: item.direction == .send ? "arrow.up.circle.fill" : "arrow.down.circle.fill")
-                .font(.system(size: 17))
+                .font(.system(size: UI.Icon.row))
                 .foregroundStyle(item.direction == .send ? Color.accentColor : Color.green)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
                     Text(item.name)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(UI.TypeScale.rowTitle)
                         .lineLimit(1)
                         .truncationMode(.middle)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: UI.Space.xs)
                     Text(formattedRate(item.bytesPerSec))
-                        .font(.system(size: 11).monospacedDigit())
+                        .font(UI.TypeScale.rate.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
                 if item.status == .active {
@@ -239,15 +242,33 @@ private struct TransferRow: View {
                 }
                 HStack(spacing: 5) {
                     Text(statusLabel)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(UI.TypeScale.chip)
                         .foregroundStyle(statusTint)
                     Text("· \(formattedBytes(item.bytesDone)) of \(formattedBytes(item.size))")
-                        .font(.system(size: 10).monospacedDigit())
+                        .font(UI.TypeScale.counter.monospacedDigit())
                         .foregroundStyle(.secondary)
+                }
+                // The engine goes to real trouble to explain a failure —
+                // "sha256 mismatch — file discarded", "data streams ended
+                // early". The row used to collapse all of that to the word
+                // "Failed" and drop the reason on the floor.
+                if let failureReason {
+                    Text(failureReason)
+                        .font(UI.TypeScale.counter)
+                        .foregroundStyle(.red)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .help(failureReason)
                 }
             }
         }
         .padding(.vertical, 2)
+    }
+
+    /// The reason a transfer failed, when it did.
+    private var failureReason: String? {
+        guard case .failed(let reason) = item.status, !reason.isEmpty else { return nil }
+        return reason
     }
 
     private var statusLabel: String {
@@ -325,17 +346,20 @@ private struct LanesColumn: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .glassPanel(cornerRadius: 18)
+                .glassPanel(cornerRadius: UI.Radius.panel)
 
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    // Negative tracking: large type needs its letters pulled in
+                    // or it reads as loose and unfinished next to 11 pt body.
                     Text(formattedRate(combinedRate))
-                        .font(.system(size: 30, weight: .semibold).monospacedDigit())
+                        .font(UI.TypeScale.display.monospacedDigit())
+                        .tracking(-0.5)
                     Text("combined").font(.caption).foregroundStyle(.secondary)
                 }
                 .padding(.horizontal, 18)
                 .padding(.vertical, 12)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .glassPanel(cornerRadius: 18)
+                .glassPanel(cornerRadius: UI.Radius.panel)
 
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Activity").font(.headline)
@@ -356,9 +380,12 @@ private struct LanesColumn: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .glassPanel(cornerRadius: 18)
+                .glassPanel(cornerRadius: UI.Radius.panel)
             }
-            .padding(20)
+            .padding(UI.Space.l)
+            // Bound the measure, then pin it left: prose and the display figure
+            // stop stretching on a wide window, but the column stays anchored.
+            .frame(maxWidth: UI.readableWidth, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .padding(.bottom, 56) // room for the dock strip so content never scrolls under it
@@ -399,19 +426,19 @@ private struct LaneRow: View {
     var body: some View {
         HStack(spacing: 11) {
             Image(systemName: symbol)
-                .font(.system(size: 15))
+                .font(.system(size: UI.Icon.lane))
                 .foregroundStyle(tint)
                 .frame(width: 22)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack {
-                    Text(title).font(.system(size: 12, weight: .semibold))
+                    Text(title).font(UI.TypeScale.laneTitle)
                     Text(active ? "active" : (rate > 0 ? "idle" : "standby"))
                         .font(.caption2)
                         .foregroundStyle(active ? tint : Color.secondary)
-                    Spacer(minLength: 6)
+                    Spacer(minLength: UI.Space.xs)
                     Text(formattedRate(rate))
-                        .font(.system(size: 12).monospacedDigit())
+                        .font(UI.TypeScale.laneRate.monospacedDigit())
                         .foregroundStyle(rate > 0 ? Color.primary : Color.secondary)
                 }
                 ProgressView(value: fraction)
@@ -435,17 +462,17 @@ private struct StatusBar: View {
     var body: some View {
         HStack(spacing: 8) {
             Text(model.statusText)
-                .font(.system(size: 11))
+                .font(UI.TypeScale.rate)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
             Spacer()
             if model.queuedCount > 0 {
                 Text("\(model.queuedCount) queued")
-                    .font(.system(size: 10, weight: .medium).monospacedDigit())
+                    .font(UI.TypeScale.chip.monospacedDigit())
                     .foregroundStyle(Color.accentColor)
             }
             Text(model.usbLaneReady ? "USB lane up" : "Wi-Fi only")
-                .font(.system(size: 10, weight: .medium))
+                .font(UI.TypeScale.chip)
                 .foregroundStyle(model.usbLaneReady ? Color.green : Color.secondary)
         }
         .padding(.horizontal, 14)

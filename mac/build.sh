@@ -32,6 +32,14 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
+# The icon is generated, not drawn by hand — see tools/make-icon.swift. The
+# bundle still builds without it; it just looks unfinished in the Dock.
+if [[ -f HyperSend.icns ]]; then
+  cp HyperSend.icns "$APP/Contents/Resources/HyperSend.icns"
+else
+  echo "note: HyperSend.icns missing — run tools/make-icon.swift to regenerate" >&2
+fi
+
 echo "compiling $COUNT source files…"
 # shellcheck disable=SC2086 -- deliberately unquoted so the file list splits
 swiftc "${SWIFT_FLAGS[@]}" $SOURCES -o "$BINARY"
