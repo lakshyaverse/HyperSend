@@ -1,0 +1,27 @@
+{
+  "name": "hypersend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HyperSend — a high-performance LAN file transfer engine (macOS <-> Android) built as a coding exercise.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "hypersend": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "start": "npm run build && node dist/cli.js",
+    "bench": "npm run build && node dist/bench.js",
+    "test": "npm run build && node --test --test-reporter=spec dist/*.test.js"
+  },
+  "dependencies": {
+    "nanoid": "^5.0.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.7.0"
+  }
+}
