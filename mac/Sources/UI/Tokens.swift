@@ -1,7 +1,7 @@
 import SwiftUI
 import QuartzCore
 
-// The window's design system, rebuilt around Apple's Liquid Glass.
+// The window's design system, built around Apple's Liquid Glass.
 //
 // The reference is the macOS 26 "Icon Composer" window: a pastel scene behind
 // the whole window, and every panel — sidebar, inspector, toolbar chips —
@@ -9,12 +9,21 @@ import QuartzCore
 // three things:
 //
 //   1. The scene palette. A soft sky that the glass refracts; without it the
-//      glass reads as grey blur, not as glass.
+//      glass reads as grey blur, not as glass. Light bends visibly only when
+//      there is light to bend, so the scene carries blooms the panels can
+//      lens.
 //   2. Radius + spacing tokens. One radius system, applied everywhere.
 //   3. The glass helpers. On macOS 26+ they apply the system's *real* Liquid
 //      Glass material (`glassEffect`, `Glass.regular/.clear`, NSGlassEffectView
-//      — not a CSS-style fake). Below 26 they fall back to HUD materials, so
-//      the app still runs on macOS 14/15 with slightly less shimmer.
+//      — not a CSS-style fake). Below 26 they fall back to HUD materials plus a
+//      painted fresnel edge, so the app still runs on macOS 14/15.
+//
+// Divisions of labour, straight from Apple's guidance: `interactive()` glass
+// is for controls that respond to touch; panels use plain `.regular` so they
+// stay quiet; `.clear` is for elements that should show the scene through —
+// the hero well and selected pills. Neighbouring glass shapes must sit in the
+// same `GlassEffectContainer` to lens as one group; the window's content is
+// wrapped in exactly one.
 
 // MARK: - Scene palette
 
@@ -28,11 +37,14 @@ enum Scene {
         (Color(red: 0.39, green: 0.58, blue: 0.98), 1.00),
     ]
 
-    /// Warm accents that break the blue so the scene reads as weather, not wallpaper.
+    /// Warm accents that break the blue so the scene reads as weather, not
+    /// wallpaper. The white bloom exists for the glass: a bright region the
+    /// lensing has something to bend.
     static let warmStops: [(Color, CGFloat, CGRect)] = [
         (Color(red: 1.00, green: 0.88, blue: 0.60), 0.55, CGRect(x: 0.05, y: 0.02, width: 0.55, height: 0.42)),
         (Color(red: 0.98, green: 0.72, blue: 0.66), 0.45, CGRect(x: 0.55, y: 0.30, width: 0.45, height: 0.50)),
         (Color(red: 0.86, green: 0.85, blue: 1.00), 0.45, CGRect(x: -0.10, y: 0.45, width: 0.50, height: 0.55)),
+        (Color.white, 0.34, CGRect(x: 0.22, y: 0.04, width: 0.56, height: 0.44)),
     ]
 
     /// Dark-mode sky: same composition, night shift.
@@ -47,6 +59,7 @@ enum Scene {
         (Color(red: 0.16, green: 0.22, blue: 0.42), 0.35, CGRect(x: 0.05, y: 0.02, width: 0.55, height: 0.42)),
         (Color(red: 0.22, green: 0.16, blue: 0.34), 0.30, CGRect(x: 0.55, y: 0.30, width: 0.45, height: 0.50)),
         (Color(red: 0.13, green: 0.17, blue: 0.35), 0.30, CGRect(x: -0.10, y: 0.45, width: 0.50, height: 0.55)),
+        (Color.white, 0.10, CGRect(x: 0.22, y: 0.04, width: 0.56, height: 0.44)),
     ]
 }
 
@@ -128,24 +141,26 @@ enum UI {
 // MARK: - Glass helpers
 //
 // Each helper compiles to two bodies: the macOS 26+ body applies the real
-// system Liquid Glass; the earlier body layers HUD materials. Callers never
-// branch on availability themselves.
+// system Liquid Glass; the earlier body layers HUD materials under a painted
+// fresnel edge — the bright top rim that makes plastic read as glass. Callers
+// never branch on availability themselves.
 
 extension View {
 
-    /// A floating glass panel (sidebar, inspector, drop well).
+    /// A floating glass panel (sidebar, inspector, drop well). Panels are
+    /// deliberately *not* interactive: `interactive()` is for controls, and a
+    /// panel that glows on hover reads as a button.
     @ViewBuilder
     func glassPanel(cornerRadius: CGFloat = UI.Radius.panel) -> some View {
         if #available(macOS 26.0, *) {
-            self.glassEffect(.regular.interactive(), in: .rect(cornerRadius: cornerRadius, style: .continuous))
+            self.glassEffect(.regular, in: .rect(cornerRadius: cornerRadius, style: .continuous))
         } else {
             self
                 .background(.regularMaterial, in: .rect(cornerRadius: cornerRadius, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.35), lineWidth: 1)
-                }
-                .shadow(color: .black.opacity(0.18), radius: 18, y: 8)
+                .overlay(fresnelEdge(cornerRadius: cornerRadius))
+                // Big elements cast deeper, softer shadows — the material is
+                // "thicker", per the system's own behaviour as glass scales up.
+                .shadow(color: .black.opacity(0.22), radius: 22, y: 10)
         }
     }
 
@@ -157,14 +172,12 @@ extension View {
         } else {
             self
                 .background(.thinMaterial, in: .rect(cornerRadius: cornerRadius, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.28), lineWidth: 1)
-                }
+                .overlay(fresnelEdge(cornerRadius: cornerRadius))
         }
     }
 
-    /// Toolbar chips and buttons.
+    /// Toolbar chips and buttons. Interactive: these are controls, and the
+    /// system's glow-on-touch belongs to them.
     @ViewBuilder
     func glassChip(cornerRadius: CGFloat = UI.Radius.control) -> some View {
         if #available(macOS 26.0, *) {
@@ -172,10 +185,7 @@ extension View {
         } else {
             self
                 .background(.ultraThinMaterial, in: .rect(cornerRadius: cornerRadius, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.30), lineWidth: 1)
-                }
+                .overlay(fresnelEdge(cornerRadius: cornerRadius))
         }
     }
 
@@ -187,10 +197,46 @@ extension View {
         } else {
             self
                 .background(.ultraThinMaterial, in: .rect(cornerRadius: cornerRadius, style: .continuous))
+                .overlay(fresnelEdge(cornerRadius: cornerRadius, strength: 0.4))
+        }
+    }
+
+    /// A selected row as its own little floating lens: clear glass over the
+    /// panel it sits on, rimmed and shadowed so it lifts off. Before macOS 26,
+    /// a plain white fill — same job, less optics.
+    @ViewBuilder
+    func glassSelection(cornerRadius: CGFloat = UI.Radius.control) -> some View {
+        if #available(macOS 26.0, *) {
+            self
+                .glassEffect(.clear, in: .rect(cornerRadius: cornerRadius, style: .continuous))
                 .overlay {
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                        .strokeBorder(.white.opacity(0.4), lineWidth: 1)
+                        .strokeBorder(.white.opacity(0.45), lineWidth: 1)
                 }
+                .shadow(color: .black.opacity(0.18), radius: 6, y: 3)
+        } else {
+            self.background(
+                Color.white.opacity(0.55),
+                in: .rect(cornerRadius: cornerRadius, style: .continuous),
+            )
         }
+    }
+
+    /// The bright top rim that sells "glass" on systems without the real
+    /// material: strongest at the top edge where a light source would sit,
+    /// dissolving down the sides.
+    private func fresnelEdge(cornerRadius: CGFloat, strength: Double = 0.55) -> some View {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+            .strokeBorder(
+                LinearGradient(
+                    stops: [
+                        .init(color: .white.opacity(strength), location: 0),
+                        .init(color: .white.opacity(strength * 0.2), location: 0.35),
+                        .init(color: .white.opacity(0), location: 0.8),
+                    ],
+                    startPoint: .top, endPoint: .bottom,
+                ),
+                lineWidth: 1,
+            )
     }
 }

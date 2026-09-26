@@ -31,3 +31,6 @@ android/local.properties
 # ── Xcode build products ────────────────────────────────────────────────────
 mac/build/
 mac/*.dmg
+
+# ── Xcode user state ─────────────────────────────────────────────────────────
+xcuserdata/

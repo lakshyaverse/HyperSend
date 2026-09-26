@@ -25,15 +25,18 @@ struct HyperSendView: View {
             SceneBackdrop()
                 .ignoresSafeArea()
 
-            HStack(spacing: UI.Space.s) {
-                DeviceSidebar(model: model)
-                    .frame(width: 208)
-
-                TransferSurface(model: model)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                Inspector(model: model)
-                    .frame(width: 250)
+            // One container for every glass shape in the window: neighbouring
+            // panels lens as a group, the way the system's own chrome does.
+            // (Local containers still nest inside — the magnetic button keeps
+            // its own so its chrome flexes on press.)
+            Group {
+                if #available(macOS 26.0, *) {
+                    GlassEffectContainer {
+                        content
+                    }
+                } else {
+                    content
+                }
             }
             .padding(UI.Space.s)
         }
@@ -52,6 +55,21 @@ struct HyperSendView: View {
             dropActive = targeted
         }
         .frame(minWidth: 760, minHeight: 480)
+    }
+
+    /// Everything that floats on the scene, extracted so the availability
+    /// branch above stays a one-liner.
+    private var content: some View {
+        HStack(spacing: UI.Space.s) {
+            DeviceSidebar(model: model)
+                .frame(width: 208)
+
+            TransferSurface(model: model)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+            Inspector(model: model)
+                .frame(width: 250)
+        }
     }
 }
 
@@ -163,6 +181,7 @@ private struct DeviceSidebar: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .glassChip(cornerRadius: UI.Radius.control)
                 .help("Settings")
             }
             .padding(.top, 2)
@@ -254,10 +273,13 @@ private struct DeviceRow: View {
             }
             .padding(.horizontal, UI.Space.xs)
             .padding(.vertical, 6)
+            // Selected rows are their own floating lens over the panel glass,
+            // the way the system marks selection in its chrome. The glass goes
+            // on a clear host — a shape here would paint its own fill on top.
             .background {
                 if selected {
-                    RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous)
-                        .fill(Color.white.opacity(0.55))
+                    Color.clear
+                        .glassSelection(cornerRadius: UI.Radius.control)
                 }
             }
             .contentShape(Rectangle())
