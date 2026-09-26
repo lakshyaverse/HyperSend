@@ -91,15 +91,22 @@ private struct SceneBackdrop: View {
                     stops: sky.map { .init(color: $0.0, location: $0.1) },
                     startPoint: .top, endPoint: .bottom,
                 )
+                // Blooms are full-bleed radial washes centred where their rect
+                // sits. Framing each one used to clip the gradient while it was
+                // still visibly coloured — the boxy edges. Full-bleed has no
+                // frame to clip, and a mid stop melts the falloff so a bloom
+                // fades into the sky instead of stopping at a border.
                 ForEach(Array(warm.enumerated()), id: \.offset) { _, stop in
                     RadialGradient(
-                        colors: [stop.0.opacity(stop.1), .clear],
+                        stops: [
+                            .init(color: stop.0.opacity(stop.1), location: 0),
+                            .init(color: stop.0.opacity(stop.1 * 0.35), location: 0.4),
+                            .init(color: .clear, location: 1.0),
+                        ],
                         center: UnitPoint(x: stop.2.midX, y: stop.2.midY),
                         startRadius: 0,
-                        endRadius: max(size.width, size.height) * max(stop.2.width, stop.2.height) * 0.9,
+                        endRadius: max(size.width, size.height) * 0.75,
                     )
-                    .frame(width: size.width * stop.2.width, height: size.height * stop.2.height)
-                    .position(x: size.width * stop.2.midX, y: size.height * stop.2.midY)
                 }
             }
             .overlay(Grain().opacity(0.05).allowsHitTesting(false))
