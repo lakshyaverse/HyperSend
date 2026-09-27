@@ -35,11 +35,11 @@ struct HyperSendView: View {
 
     var body: some View {
         ZStack {
-            // The water: only the scene backdrop is warped by the drop
-            // shader — never the glass above it (see DropRefractionModifier).
+            // The water: while a drop ripple runs, the backdrop's light
+            // sources are displaced by the travelling wave and the crest
+            // rings sweep beneath the glass — see SceneBackdrop.
             SceneBackdrop()
                 .ignoresSafeArea()
-                .modifier(DropRefractionModifier(controller: .shared))
 
             // One container for every glass shape in the window: neighbouring
             // panels lens as a group, the way the system's own chrome does.
@@ -66,12 +66,9 @@ struct HyperSendView: View {
         .overlay {
             ZStack {
                 if dropActive { DropTargetOutline() }
-                // The refraction's light: crest, trough and splash, drawn
-                // above the glass from the same wavefront formula as the
-                // shader bending the scene beneath it.
-                RefractionLight(controller: .shared)
                 // The splash: expanding ring, droplet crown, core flash at
-                // the exact landing point.
+                // the exact landing point. The wave itself lives behind the
+                // glass, in the backdrop.
                 if let impact = dropImpact {
                     RefractionBurst(impact: impact)
                         .position(x: impact.point.x, y: impact.point.y)
@@ -96,6 +93,12 @@ struct HyperSendView: View {
             return true
         } isTargeted: { targeted in
             dropActive = targeted
+        }
+        .onChange(of: dropActive) {
+            // A completed drag does not always deliver a final `false`, and a
+            // highlight that outlives the drag reads as a broken window. A
+            // new drag starting also clears the last impact's stale rings.
+            if dropActive { dropImpact = nil }
         }
         .frame(minWidth: 760, minHeight: 480)
         // Testing hook (HS_SIM_DROP): runs the identical visual path a real
@@ -130,42 +133,149 @@ struct HyperSendView: View {
 
 // MARK: - Scene backdrop
 
-/// The pastel sky every glass panel refracts. Three warm blooms over a blue
-/// vertical wash; in dark mode the same composition at night values. Faint
-/// grain keeps large gradients from banding.
+/// Bisect helper kept for recordings: flattens a subtree into one layer.
+struct BackdropFlatten: ViewModifier {
+    func body(content: Content) -> some View {
+        if RefractionFlags.flattenBackdrop {
+            content.compositingGroup()
+        } else {
+            content
+        }
+    }
+}
+
+/// The pastel sky every glass panel refracts.
+///
+/// At rest it draws live gradients. While a drop ripple runs, a Canvas
+/// redraws the same scene with the wave applied in *light*: each bloom (the
+/// scene's light source) is displaced by the travelling wavefront, and a
+/// bright crest ring with a dark trough sweep outward beneath the glass —
+/// the panels lens a scene whose light is visibly moving, which reads as the
+/// glass bending.
+///
+/// This is drawn directly rather than through a Metal effect deliberately:
+/// SwiftUI's `distortionEffect`/`layerEffect` pipelines mangle colour on
+/// this OS build (a measured, uniform double-gamma wash, independent of
+/// input), and the wave is simple enough to evaluate on the CPU per frame.
 private struct SceneBackdrop: View {
     @Environment(\.colorScheme) private var colorScheme
+    var controller: RippleController = .shared
 
     var body: some View {
-        let sky = colorScheme == .dark ? Scene.skyStopsDark : Scene.skyStops
-        let warm = colorScheme == .dark ? Scene.warmStopsDark : Scene.warmStops
         GeometryReader { proxy in
             let size = proxy.size
-            ZStack {
-                LinearGradient(
-                    stops: sky.map { .init(color: $0.0, location: $0.1) },
-                    startPoint: .top, endPoint: .bottom,
-                )
-                // Blooms are full-bleed radial washes centred where their rect
-                // sits. Framing each one used to clip the gradient while it was
-                // still visibly coloured — the boxy edges. Full-bleed has no
-                // frame to clip, and a mid stop melts the falloff so a bloom
-                // fades into the sky instead of stopping at a border.
-                ForEach(Array(warm.enumerated()), id: \.offset) { _, stop in
-                    RadialGradient(
-                        stops: [
-                            .init(color: stop.0.opacity(stop.1), location: 0),
-                            .init(color: stop.0.opacity(stop.1 * 0.35), location: 0.4),
-                            .init(color: .clear, location: 1.0),
-                        ],
-                        center: UnitPoint(x: stop.2.midX, y: stop.2.midY),
-                        startRadius: 0,
-                        endRadius: max(size.width, size.height) * 0.75,
+            let sky = colorScheme == .dark ? Scene.skyStopsDark : Scene.skyStops
+            let warm = colorScheme == .dark ? Scene.warmStopsDark : Scene.warmStops
+
+            if !RefractionFlags.shaderDisabled {
+                TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !controller.hasImpact)) { timeline in
+                    let elapsed = controller.hasImpact
+                        ? timeline.date.timeIntervalSince(controller.firedAt)
+                        : 0.0
+                    let running = controller.hasImpact
+                        && elapsed >= 0
+                        && elapsed < RippleController.duration
+                    ZStack {
+                        rippleCanvas(sky: sky, warm: warm, size: size, elapsed: running ? elapsed : nil)
+                        if !RefractionFlags.grainDisabled {
+                            Grain().opacity(0.05).allowsHitTesting(false)
+                        }
+                    }
+                }
+            } else {
+                rippleCanvas(sky: sky, warm: warm, size: size, elapsed: nil)
+                    .overlay {
+                        if !RefractionFlags.grainDisabled {
+                            Grain().opacity(0.05).allowsHitTesting(false)
+                        }
+                    }
+            }
+        }
+    }
+
+    /// The scene, with the drop wave applied when `elapsed` is non-nil.
+    /// Blooms are the scene's light: displacing them along the wavefront is
+    /// what makes the glass above read as bending.
+    private func rippleCanvas(sky: [(Color, CGFloat)], warm: [(Color, CGFloat, CGRect)], size: CGSize, elapsed: Double?) -> some View {
+        Canvas { context, canvasSize in
+            // Sky: the vertical wash, as always.
+            context.fill(
+                Path(CGRect(origin: .zero, size: canvasSize)),
+                with: .linearGradient(
+                    Gradient(stops: sky.map { .init(color: $0.0, location: $0.1) }),
+                    startPoint: CGPoint(x: 0, y: 0),
+                    endPoint: CGPoint(x: 0, y: canvasSize.height),
+                ),
+            )
+
+            if let elapsed {
+                let (radius, energy) = DropWave.state(at: elapsed)
+                // Crest + trough rings: the wavefront's body, sweeping out
+                // beneath the glass.
+                if RefractionFlags.lightDisabled == false, energy > 0.004 {
+                    let troughRect = CGRect(
+                        x: controller.origin.x - radius + 24,
+                        y: controller.origin.y - radius + 24,
+                        width: (radius - 24) * 2,
+                        height: (radius - 24) * 2,
                     )
+                    context.drawLayer { layer in
+                        layer.addFilter(.blur(radius: 10))
+                        layer.stroke(
+                            Path(ellipseIn: troughRect),
+                            with: .color(.black.opacity(0.07 * energy)),
+                            lineWidth: 16,
+                        )
+                    }
+                    let crestRect = CGRect(
+                        x: controller.origin.x - radius,
+                        y: controller.origin.y - radius,
+                        width: radius * 2,
+                        height: radius * 2,
+                    )
+                    context.drawLayer { layer in
+                        layer.addFilter(.blur(radius: 12))
+                        layer.stroke(
+                            Path(ellipseIn: crestRect),
+                            with: .color(.white.opacity(0.15 * energy)),
+                            lineWidth: 24,
+                        )
+                    }
+                }
+                // Blooms ride the wave: displaced along the direction from
+                // the impact, by the ring's displacement at their centre.
+                for stop in warm {
+                    let centre = CGPoint(x: stop.2.midX * canvasSize.width, y: stop.2.midY * canvasSize.height)
+                    let shifted = DropWave.displaced(centre, origin: controller.origin, radius: radius, energy: energy)
+                    drawBloom(context: context, stop: stop, centre: shifted, size: canvasSize)
+                }
+            } else {
+                for stop in warm {
+                    let centre = CGPoint(x: stop.2.midX * canvasSize.width, y: stop.2.midY * canvasSize.height)
+                    drawBloom(context: context, stop: stop, centre: centre, size: canvasSize)
                 }
             }
-            .overlay(Grain().opacity(0.05).allowsHitTesting(false))
         }
+    }
+
+    /// One full-bleed bloom: a radial wash centred where its rect sits, with
+    /// a mid stop melting the falloff so it fades into the sky instead of
+    /// stopping at a border. Framing these used to clip the gradient while
+    /// it was still visibly coloured — the boxy edges.
+    private func drawBloom(context: GraphicsContext, stop: (Color, CGFloat, CGRect), centre: CGPoint, size: CGSize) {
+        context.fill(
+            Path(CGRect(origin: .zero, size: size)),
+            with: .radialGradient(
+                Gradient(stops: [
+                    .init(color: stop.0.opacity(stop.1), location: 0),
+                    .init(color: stop.0.opacity(stop.1 * 0.35), location: 0.4),
+                    .init(color: .clear, location: 1.0),
+                ]),
+                center: centre,
+                startRadius: 0,
+                endRadius: max(size.width, size.height) * 0.75,
+            ),
+        )
     }
 }
 
@@ -556,15 +666,7 @@ private struct TransferCard: View {
     }
 
     private var segments: [LaneSegment] {
-        let lanes = item.lanes
-        guard !lanes.isEmpty else {
-            return [LaneSegment(label: "", bytes: max(item.bytesDone, 0))]
-        }
-        let known = UI.Lane.order.filter { lanes[$0] != nil }
-        let others = lanes.keys.filter { !UI.Lane.order.contains($0) }.sorted()
-        return (known + others).compactMap { key in
-            lanes[key].map { LaneSegment(label: key, bytes: $0.bytes) }
-        }
+        TransferDisplay.laneSegments(item)
     }
 
     private var laneLegend: some View {
@@ -682,6 +784,21 @@ private struct Inspector: View {
             VStack(alignment: .leading, spacing: UI.Space.s) {
                 inspectorSection("Activity") {
                     ActivityCounter(model: model)
+                }
+
+                inspectorSection("In flight") {
+                    if model.transfers.isEmpty {
+                        Text("Nothing in flight.")
+                            .font(UI.Text.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: UI.Space.s) {
+                            ForEach(Array(model.transfers.reversed().prefix(4).enumerated()), id: \.element.id) { index, item in
+                                TransferProgressRow(item: item)
+                                    .glassEntrance(delay: Double(index) * 0.05)
+                            }
+                        }
+                    }
                 }
 
                 inspectorSection("Lanes") {
@@ -880,6 +997,92 @@ private struct ActivityCounter: View {
                 }
                 .modifier(StatusPulse(trigger: model.transfers.map(\.status)))
             }
+        }
+    }
+}
+
+// MARK: - In-flight progress
+
+/// Derived display values shared by the transfer card and the inspector's
+/// in-flight rows, so both surfaces always agree on what a transfer says.
+private enum TransferDisplay {
+    static func percentText(_ item: TransferItem) -> String {
+        "\(Int((item.fraction * 100).rounded()))%"
+    }
+
+    static func laneSegments(_ item: TransferItem) -> [LaneSegment] {
+        let lanes = item.lanes
+        guard !lanes.isEmpty else {
+            return [LaneSegment(label: "", bytes: max(item.bytesDone, 0))]
+        }
+        let known = UI.Lane.order.filter { lanes[$0] != nil }
+        let others = lanes.keys.filter { !UI.Lane.order.contains($0) }.sorted()
+        return (known + others).compactMap { key in
+            lanes[key].map { LaneSegment(label: key, bytes: $0.bytes) }
+        }
+    }
+}
+
+/// One line per file in flight: direction glyph, name, lane meter, percent
+/// right-aligned — the transfer card's grammar at the inspector's scale, so
+/// progress is readable at a glance without watching the middle of the
+/// window. Reads the model; owns no behaviour.
+private struct TransferProgressRow: View {
+    let item: TransferItem
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(spacing: UI.Space.xxs) {
+                Image(systemName: item.direction == .send ? "arrow.up" : "arrow.down")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(.white)
+                    .frame(width: 15, height: 15)
+                    .background(Circle().fill(Color.accentColor.opacity(0.85)))
+
+                Text(item.name)
+                    .font(UI.Text.caption)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                Spacer(minLength: UI.Space.xxs)
+
+                Text(TransferDisplay.percentText(item))
+                    .font(UI.Text.caption.monospacedDigit())
+                    .foregroundStyle(statusTint)
+            }
+
+            LaneBar(segments: TransferDisplay.laneSegments(item), total: item.size)
+
+            HStack {
+                Text(item.peerName)
+                    .font(UI.Text.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Text(statusText)
+                    .font(UI.Text.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .modifier(StatusPulse(trigger: item.status))
+    }
+
+    private var statusText: String {
+        switch item.status {
+        case .queued: return "Queued"
+        case .active: return formattedRate(item.bytesPerSec)
+        case .verifying: return "Verifying"
+        case .done: return "Verified"
+        case .failed: return "Failed"
+        }
+    }
+
+    private var statusTint: Color {
+        switch item.status {
+        case .failed: return Color(nsColor: .systemRed)
+        case .active, .verifying: return .accentColor
+        case .done: return .primary
+        default: return .secondary
         }
     }
 }

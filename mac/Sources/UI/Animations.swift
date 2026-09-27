@@ -50,10 +50,6 @@ final class RippleController {
     static let maxRadius: CGFloat = 430
     /// Seconds the full refraction choreography runs.
     static let duration: Double = 1.6
-    /// Widens the distortion effect's render target so the kernel can pull
-    /// samples from outside its bounds; covers the worst-case displacement
-    /// the shader computes (≈35 pt at the crest).
-    static let maxSampleOffset = CGSize(width: 40, height: 40)
 
     func fire(at point: CGPoint) {
         origin = point
@@ -63,6 +59,20 @@ final class RippleController {
 }
 
 // MARK: - Drop impact
+
+/// Debug/tuning switches: the refraction is two independent systems (the
+/// Metal warp on the backdrop, the light overlay above the glass), so each
+/// can be silenced from the environment to attribute any visual artifact to
+/// one or the other during screen recordings.
+enum RefractionFlags {
+    static let shaderDisabled = ProcessInfo.processInfo.environment["HS_NO_SHADER"] == "1"
+    static let lightDisabled = ProcessInfo.processInfo.environment["HS_NO_LIGHT"] == "1"
+    /// Bisecting the backdrop wash: is the grain overlay's view-level alpha
+    /// the part that flattens badly inside the effect's offscreen?
+    static let grainDisabled = ProcessInfo.processInfo.environment["HS_NO_GRAIN"] == "1"
+    /// Composites the backdrop subtree into one layer before the warp.
+    static let flattenBackdrop = ProcessInfo.processInfo.environment["HS_FLATTEN"] == "1"
+}
 
 /// The coordinate space drops are measured in: the main window's own.
 enum RippleSpace {
@@ -82,138 +92,46 @@ extension Notification.Name {
     static let hyperSendSimDrop = Notification.Name("HyperSendSimDrop")
 }
 
-// MARK: - Scene refraction (Metal)
+// MARK: - Drop wave maths
 
-/// Warps the *scene backdrop* — never the glass above it. While a ripple
-/// runs, a `TimelineView` drives the shader's clock and the Metal
-/// `dropRefraction` distortion bends the sky as a decaying water-ring from
-/// the drop point; every glass panel lenses that moving scene, so the light
-/// entering the glass visibly bends.
-///
-/// This layering is a hard constraint, learned the hard way: wrapping the
-/// whole window (glass included) in a distortion makes the system's real
-/// Liquid Glass views fail to composite — the panels render blank for the
-/// duration of the effect. Bending only the backdrop beneath the glass is
-/// both safe and the physically correct order (light refracts as it *enters*
-/// the material, so what must warp is what sits behind it).
-struct DropRefractionModifier: ViewModifier {
-    var controller: RippleController
-
-    func body(content: Content) -> some View {
-        if #available(macOS 14.0, *) {
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !controller.hasImpact)) { timeline in
-                let elapsed = controller.hasImpact
-                    ? timeline.date.timeIntervalSince(controller.firedAt)
-                    : 0.0
-                let running = controller.hasImpact && elapsed < RippleController.duration
-                content
-                    // A *distortion* effect: the kernel maps displayed
-                    // position → source position (a warp). The kernel comes
-                    // from the build-time-compiled default metallib —
-                    // `Shaders.metal` exports it as [[stitchable]].
-                    .distortionEffect(
-                        Shader(
-                            function: ShaderFunction(library: .default, name: "dropRefraction"),
-                            arguments: [
-                                .float(Float(elapsed)),
-                                // Shader user space is points (Y down); the
-                                // drop point arrives in points.
-                                .float(Float(controller.origin.x)),
-                                .float(Float(controller.origin.y)),
-                                .float(Float(RippleController.maxRadius)),
-                            ],
-                        ),
-                        maxSampleOffset: RippleController.maxSampleOffset,
-                        isEnabled: running,
-                    )
-            }
-        } else {
-            content
-        }
-    }
-}
-
-/// The light of a refraction, painted above the glass in the window overlay:
-/// a bright crest riding the wavefront, a dark trough just behind it, and the
-/// splash bloom at the impact. Radius formula mirrors `dropRefraction` in
-/// Shaders.metal exactly — both describe the same wavefront.
-struct RefractionLight: View {
-    var controller: RippleController
-
-    var body: some View {
-        if controller.hasImpact {
-            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !controller.hasImpact)) { timeline in
-                let elapsed = timeline.date.timeIntervalSince(controller.firedAt)
-                if elapsed >= 0, elapsed < RippleController.duration {
-                    Canvas { context, size in
-                        let clamped = min(elapsed / 1.5, 1.0)
-                        // Same curve as the shader: fast start, long tail.
-                        let radius = RippleController.maxRadius * (1.0 - pow(1.0 - clamped, 3.0))
-                        // Same decay as the shader.
-                        let energy = exp(-elapsed * 2.1) * (1.0 - smoothstep(0.0, 1.45, elapsed))
-                        guard energy > 0.003 else { return }
-
-                        // Trough: dim ring just behind the crest.
-                        let troughRect = CGRect(
-                            x: controller.origin.x - radius + 24,
-                            y: controller.origin.y - radius + 24,
-                            width: (radius - 24) * 2,
-                            height: (radius - 24) * 2,
-                        )
-                        context.drawLayer { layer in
-                            layer.addFilter(.blur(radius: 14))
-                            layer.stroke(
-                                Path(ellipseIn: troughRect),
-                                with: .color(.black.opacity(0.14 * energy)),
-                                lineWidth: 20,
-                            )
-                        }
-
-                        // Crest: light gathering at the wavefront.
-                        let crestRect = CGRect(
-                            x: controller.origin.x - radius,
-                            y: controller.origin.y - radius,
-                            width: radius * 2,
-                            height: radius * 2,
-                        )
-                        context.drawLayer { layer in
-                            layer.addFilter(.blur(radius: 16))
-                            layer.stroke(
-                                Path(ellipseIn: crestRect),
-                                with: .color(.white.opacity(0.40 * energy)),
-                                lineWidth: 28,
-                            )
-                        }
-
-                        // Splash: the bloom where the drop landed.
-                        let splash = CGRect(
-                            x: controller.origin.x - 48,
-                            y: controller.origin.y - 48,
-                            width: 96,
-                            height: 96,
-                        )
-                        context.fill(
-                            Path(ellipseIn: splash),
-                            with: .color(.white.opacity(0.5 * min(1, energy * 3))),
-                        )
-                    }
-                    .allowsHitTesting(false)
-                }
-            }
-        }
+/// The travelling wavefront, evaluated on the CPU. The scene's blooms (its
+/// light sources) are displaced along this wave and the crest/trough rings
+/// sweep with it — the glass above lenses a scene whose light visibly
+/// moves, which reads as the glass bending. Pure maths, no shader: SwiftUI's
+/// effect pipelines mangle colour on this OS build (a measured uniform
+/// double-gamma wash, independent of input), and this wave is simple enough
+/// to evaluate per frame on the CPU.
+enum DropWave {
+    /// Wavefront radius and remaining energy at `elapsed` seconds.
+    static func state(at elapsed: Double) -> (radius: CGFloat, energy: Double) {
+        let clamped = min(elapsed / 1.5, 1.0)
+        // Fast start, long ease-out tail.
+        let radius = RippleController.maxRadius * (1 - pow(1 - clamped, 3))
+        // Exponential decay with a hard cut.
+        let energy = exp(-elapsed * 2.1) * (1 - smoothstep(0, 1.45, elapsed))
+        return (radius, energy)
     }
 
-    /// GL-style smoothstep, matching the shader's falloff.
-    private func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
+    /// Displaces a point along the wave: a Gaussian-windowed sine ring
+    /// centred on the wavefront, the shape a water ring makes.
+    static func displaced(_ point: CGPoint, origin: CGPoint, radius: CGFloat, energy: Double) -> CGPoint {
+        let dx = point.x - origin.x
+        let dy = point.y - origin.y
+        let d = max((dx * dx + dy * dy).squareRoot(), 1)
+        let x = d - radius
+        let width: CGFloat = 24
+        let envelope = exp(-x * x / (2 * width * width))
+        let offset = CGFloat(sin(x / width * 2.4)) * envelope * 18 * CGFloat(energy)
+        return CGPoint(x: point.x + dx / d * offset, y: point.y + dy / d * offset)
+    }
+
+    /// GL-style smoothstep, for the same falloff shapes throughout.
+    static func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
         let t = min(max((x - a) / (b - a), 0), 1)
         return t * t * (3 - 2 * t)
     }
 }
 
-/// The light of a refraction: a bright crest riding the wavefront, a dark
-/// trough just behind it, and the splash bloom at the impact. The radius
-/// formula mirrors `dropRefraction` in Shaders.metal exactly — both describe
-/// the same wavefront, one bends the pixels, the other lights it.
 // MARK: - Per-panel wobble
 
 /// Physically displaces a panel as a damped radial wave radiating from where
