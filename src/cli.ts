@@ -8,6 +8,7 @@
  */
 
 import { argv, exit, stdout } from "node:process";
+import { hostname } from "node:os";
 import { DEFAULT_PORT } from "./protocol.js";
 import { DISCOVERY_PORT, discoverPeer, startBeacon } from "./discovery.js";
 import { startReceiver, sendFiles, type Progress } from "./engine.js";
@@ -80,7 +81,9 @@ async function main(): Promise<void> {
     case "receive": {
       const dest = pos[0] ?? "./received";
       const beacon = flags.get("no-beacon") !== "true";
-      const name = flags.get("name") ?? "macbook";
+      // The beacon name defaults to this machine's hostname, so a Linux or
+      // Windows receiver announces itself as what it is instead of "macbook".
+      const name = flags.get("name") ?? hostname();
       const rx = await startReceiver(dest, { port, streams, dataPort });
       const b = beacon ? startBeacon(rx.address.port, name) : null;
       stdout.write(
@@ -94,6 +97,9 @@ async function main(): Promise<void> {
         for (const f of files) stdout.write(`  ✔ ${f.path} (${fmtBytes(f.size)})\n`);
       } finally {
         b?.stop();
+        // Close the listener too: without this the process outlives the
+        // batch with a dangling handle and never returns to the shell.
+        rx.stop();
       }
       return;
     }

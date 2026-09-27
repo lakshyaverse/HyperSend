@@ -4,7 +4,7 @@
 
 A Mac app that sends files to Android over **Wi-Fi and the USB cable at the
 same time**, and checks every byte with SHA-256. No accounts, no cloud, no
-dependencies.
+dependencies. The same engine ships as a CLI for Linux and Windows.
 
 **Download:** [HyperSend.dmg from Releases](https://github.com/lakshyaverse/HyperSend/releases/latest)
 — open it, drag the app to Applications, done. No Xcode, no terminal, no
@@ -62,7 +62,9 @@ paths is the only real win available, and it is the whole app.
 
 ## What's tested
 
-`mac/test.sh` runs 42 end-to-end checks over real loopback TCP, no mocks:
+`mac/test.sh` runs 42 end-to-end checks over real loopback TCP, no mocks. The
+Node engine carries its own suite (`npm test`, 6 checks) and CI runs it on
+Ubuntu, Windows and macOS on every push.
 multipath splitting, SHA-256 verification, resume (a matching file moves zero
 bytes, a prefix moves only the rest), out-of-order interleaved chunks, batch
 sends, back-to-back sessions, and rejection of path traversal.
@@ -97,14 +99,44 @@ The Android receiver is a single toggle: install the debug APK
 The window uses Apple's Liquid Glass on macOS 26+, and standard materials on
 earlier systems. Same layout either way.
 
+## Linux and Windows
+
+The CLI is the same engine, same protocol, same logic — no port, no fork.
+It needs Node 20 or newer and nothing else:
+
+```bash
+git clone https://github.com/lakshyaverse/HyperSend.git
+cd HyperSend
+npm install && npm run build
+```
+
+Receive (the destination folder is created if missing):
+
+```bash
+./bin/hypersend receive ~/Downloads/HyperSend        # Linux/macOS
+bin\hypersend.cmd receive %USERPROFILE%\Downloads\HyperSend   # Windows
+```
+
+Send, discover, bench — all the same commands as the Mac CLI binary:
+
+```bash
+./bin/hypersend send big.zip --to 10.0.0.5
+./bin/hypersend send big.zip                       # auto-discovers the receiver
+```
+
+The USB lane is simpler than on the Mac: Linux and Windows ship the tether
+drivers macOS lacks, so a cabled phone usually shows up as a plain network
+interface and the cable is just a second path — no `adb forward` needed. When
+a driver is missing anyway, the tunnel works exactly as documented above.
+
 ## Code
 
 ```
 mac/Sources/Engine/     protocol, discovery, adb bridge, sender, receiver
 mac/Sources/UI/         the window (SwiftUI, tokens in Tokens.swift)
 mac/Tests/              the 42-check end-to-end suite
-android/                Kotlin receiver
-src/                    Node reference engine: the protocol definition
+android/                Kotlin connector: receiver AND sender, the phone is a peer
+src/                    Node engine: the protocol definition, Linux/Windows CLI
 ```
 
 ## Sponsors
@@ -114,8 +146,7 @@ and free of dependencies — and keeps real hardware on the far end of every
 two-lane benchmark in [Numbers](#numbers).
 
 If your organisation would like to sponsor HyperSend, open an issue titled
-"sponsorship" or reach out to [@lakshyaverse](https://github.com/lakshyaverse) —
-or [buy me a coffee](https://buymeacoffee.com/lakshyaverse).
+"sponsorship" or reach out to [@lakshyaverse](https://github.com/lakshyaverse).
 
 ## Contributing
 

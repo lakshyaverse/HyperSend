@@ -14,6 +14,8 @@ in all three plus the test oracle, together, in one PR.
 
 ## Getting set up
 
+The Mac app:
+
 ```bash
 git clone https://github.com/lakshyaverse/HyperSend.git
 cd HyperSend/mac
@@ -24,9 +26,18 @@ cd HyperSend/mac
 There is a real Xcode project (`HyperSend.xcodeproj`) if you want Xcode's
 deployment pane.
 
+The CLI (Linux, Windows, macOS — the Node engine in `src/`):
+
+```bash
+npm install && npm run build && npm test
+```
+
+CI runs that suite on Ubuntu, Windows and macOS on every push; if it is red
+there, it is red.
+
 ## Before you open a PR
 
-- `mac/test.sh` passes (all 42).
+- `mac/test.sh` passes (all 42) and `npm test` passes (all 6).
 - The Android receiver still round-trips against the Mac sender if you touched
   anything protocol-side.
 - No new dependencies. The zero-dependency property is a feature.

@@ -27,6 +27,8 @@ android/local.properties
 # ── Local tooling / preview artifacts ────────────────────────────────────────
 .preview/
 .freebuff/
+.smoke-rx/
+.smoke-rx.log
 
 # ── Xcode build products ────────────────────────────────────────────────────
 mac/build/

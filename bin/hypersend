@@ -1,0 +1,14 @@
+#!/bin/sh
+# HyperSend CLI, Linux/macOS: runs the Node engine from a git clone.
+# Build once first: npm install && npm run build
+set -eu
+
+cli="$(dirname "$0")/../dist/cli.js"
+
+if [ ! -f "$cli" ]; then
+  echo "hypersend: engine not built yet ($cli)" >&2
+  echo "build it:  npm install && npm run build" >&2
+  exit 1
+fi
+
+exec node "$cli" "$@"

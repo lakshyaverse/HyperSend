@@ -1,0 +1,14 @@
+# One line-ending policy for every platform: LF in the repository and in
+# working trees, so a Windows clone builds and runs the same scripts a Mac
+# clone does, unchanged.
+* text=auto eol=lf
+
+# Binaries stay untouched.
+*.png binary
+*.icns binary
+*.dmg binary
+
+# The Windows launchers are the one place CRLF belongs.
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
