@@ -11,8 +11,9 @@
 
     <application
         android:allowBackup="false"
+        android:icon="@drawable/hypersend_icon"
         android:label="HyperSend"
-        android:theme="@android:style/Theme.DeviceDefault.Light.DarkActionBar">
+        android:theme="@style/HyperSend">
 
         <activity
             android:name=".MainActivity"
@@ -20,6 +21,13 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Share-sheet target: send FROM other apps THROUGH HyperSend. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 

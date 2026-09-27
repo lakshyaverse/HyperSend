@@ -90,6 +90,14 @@ object Protocol {
 
     fun newTransferId(): String = UUID.randomUUID().toString()
 
+    /** Shared byte formatting for UIs on both sides of the wire. */
+    fun humanBytes(n: Long): String = when {
+        n >= 1L shl 30 -> "%.2f GB".format(n.toDouble() / (1L shl 30))
+        n >= 1L shl 20 -> "%.2f MB".format(n.toDouble() / (1L shl 20))
+        n >= 1L shl 10 -> "%.1f KB".format(n.toDouble() / (1L shl 10))
+        else -> "$n B"
+    }
+
     fun sha256(file: File): String {
         val md = MessageDigest.getInstance("SHA-256")
         FileInputStream(file).use { fis ->
@@ -134,7 +142,12 @@ class BeaconResponder(
     fun start() {
         val s = java.net.DatagramSocket(null)
         s.reuseAddress = true
-        s.bind(java.net.InetSocketAddress(Protocol.DISCOVERY_PORT))
+        // Ephemeral local port on purpose: this socket only ever SENDS. Holding
+        // :44011 here used to squat the discovery port full-time, which made
+        // the send-side BeaconWatcher (same app, wants to HEAR the Mac's
+        // beacon) go v4-blind whenever receiving was on. Receivers identify us
+        // by the JSON payload, not by our source port.
+        s.bind(java.net.InetSocketAddress(0))
         s.broadcast = true
         socket = s
         val payload = Protocol.encodeBeacon(controlPort, name)

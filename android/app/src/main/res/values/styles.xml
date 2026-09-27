@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- No action bar, no black letterbox: the scene is the window, and the
+         Activity draws edge to edge under translucent system bars. -->
+    <style name="HyperSend" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/scene_top</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowLightNavigationBar">true</item>
+        <item name="android:windowLayoutInDisplayCutoutMode">shortEdges</item>
+        <item name="android:windowContentTransitions">true</item>
+        <item name="android:windowActivityTransitions">true</item>
+    </style>
+</resources>

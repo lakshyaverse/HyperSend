@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The sky, sampled to match SceneView's top stop, so the cold-start
+         window is already the scene instead of a black flash. -->
+    <color name="scene_top">#FFBDD0FA</color>
+</resources>
