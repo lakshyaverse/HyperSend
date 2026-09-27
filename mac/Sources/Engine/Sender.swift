@@ -119,7 +119,8 @@ final class SendEngine {
         let totalBytes = sizes.reduce(0, +)
 
         // ── control channel (always over the primary lane) ────────────────
-        let control = try TCPConnection.connect(host: primary.host, port: controlPort)
+        // Dual-stack: hostname or literal, v6 or v4, best address first.
+        let control = try TCPConnection.connectBest(host: primary.host, port: controlPort)
         defer { control.close() }
 
         try control.writeJSON([
@@ -140,7 +141,7 @@ final class SendEngine {
             var opened = 0
             for _ in 0 ..< max(1, socketsPerLane) {
                 do {
-                    sockets.append((lane.label, try TCPConnection.connect(host: lane.host, port: port)))
+                    sockets.append((lane.label, try TCPConnection.connectBest(host: lane.host, port: port, timeoutMs: 3000)))
                     opened += 1
                 } catch {
                     // A lane that will not open must not kill the transfer:

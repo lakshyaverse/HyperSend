@@ -313,6 +313,15 @@ final class AppModel {
                 remotePort: Proto.usbDataPort,
                 serial: serial,
             )
+            // The cable in the phone→Mac direction: the phone dials
+            // 127.0.0.1:44014 and adb hands the connection to this Mac's
+            // receiver data plane on :44012. Same refresh, since both live and
+            // die with the cable.
+            _ = ADBBridge.ensureReverse(
+                localPort: Proto.usbReverseLocalPort,
+                remotePort: Proto.usbDataPort,
+                serial: serial,
+            )
 
             DispatchQueue.main.async {
                 self.usbLaneReady = forwarded

@@ -25,6 +25,11 @@ enum Proto {
     /// adb forwards 127.0.0.1:44013 → phone:44012, and a local receiver binding
     /// 44012 never collides with it.
     static let usbLocalPort: UInt16 = 44013
+    /// Phone→Mac cable direction: `adb reverse tcp:44014 tcp:44012` lets the
+    /// PHONE dial 127.0.0.1:44014 and land on this Mac's data plane :44012.
+    /// Distinct from usbLocalPort because the two tunnels point opposite ways
+    /// and must not collide in adb's tables.
+    static let usbReverseLocalPort: UInt16 = 44014
     static let chunkSize = 2 * 1024 * 1024
     static let chunkHeaderBytes = 13
     static let maxControlBytes = 1 << 20
@@ -319,6 +324,168 @@ final class TCPConnection {
         (try? connect(host: host, port: port, timeoutMs: timeoutMs)) != nil
     }
 
+    // MARK: Dual-stack addressing
+
+    /// Every address of `host` in the best-first order the app agrees on:
+    /// global v6 > IPv4 > v6 ULA > v6 link-local > loopback. Hostnames are
+    /// resolved here; literals pass through untouched.
+    static func addressCandidates(host: String) -> [String] {
+        var out: [String] = []
+        for family in [AF_INET6, AF_INET] {
+            var hints = addrinfo()
+            hints.ai_family = family
+            var info: UnsafeMutablePointer<addrinfo>?
+            let rc = getaddrinfo(host, nil, &hints, &info)
+            defer { if let info { freeaddrinfo(info) } }
+            guard rc == 0, let info else { continue }
+            var cursor: UnsafeMutablePointer<addrinfo>? = info
+            while let ai = cursor {
+                if ai.pointee.ai_addrlen > 0, let sa = ai.pointee.ai_addr {
+                    var storage = sockaddr_storage()
+                    memcpy(&storage, sa, min(MemoryLayout<sockaddr_storage>.size, Int(ai.pointee.ai_addrlen)))
+                    if let text = describeAddress(storage) {
+                        out.append(text)
+                    }
+                }
+                cursor = ai.pointee.ai_next
+            }
+        }
+        var seen = Set<String>()
+        return out.filter { seen.insert($0).inserted }
+    }
+
+    /// Parses an address literal into sockaddr_storage (v4 or v6).
+    static func resolveNumeric(_ host: String) -> sockaddr_storage? {
+        var v4 = in_addr()
+        if inet_pton(AF_INET, host, &v4) == 1 {
+            var sa = sockaddr_in()
+            sa.sin_family = sa_family_t(AF_INET)
+            sa.sin_addr = v4
+            sa.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+            var storage = sockaddr_storage()
+            memcpy(&storage, &sa, MemoryLayout<sockaddr_in>.size)
+            storage.ss_family = sa_family_t(AF_INET)
+            return storage
+        }
+        var v6 = in6_addr()
+        if inet_pton(AF_INET6, host, &v6) == 1 {
+            var sa = sockaddr_in6()
+            sa.sin6_family = sa_family_t(AF_INET6)
+            sa.sin6_addr = v6
+            sa.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+            var storage = sockaddr_storage()
+            memcpy(&storage, &sa, MemoryLayout<sockaddr_in6>.size)
+            storage.ss_family = sa_family_t(AF_INET6)
+            return storage
+        }
+        return nil
+    }
+
+    /// inet_ntop over either family.
+    static func describeAddress(_ sa: sockaddr_storage) -> String? {
+        var host = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let rc = withUnsafePointer(to: sa) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getnameinfo($0, socklen_t(sa.ss_len), &host, socklen_t(host.count), nil, 0, NI_NUMERICHOST)
+            }
+        }
+        guard rc == 0 else { return nil }
+        let text = String(cString: host)
+        // getnameinfo renders mapped v4 as ::ffff:a.b.c.d — show plain v4.
+        if text.hasPrefix("::ffff:") { return String(text.dropFirst(7)) }
+        return text
+    }
+
+    /// Rank: global v6 first, IPv4 next, then ULA, link-local, loopback.
+    static func addressRank(_ text: String) -> Int {
+        if text.contains(":") {
+            let lower = text.lowercased()
+            if lower == "::1" { return 4 }
+            if lower.hasPrefix("fe80") { return 3 }
+            if lower.hasPrefix("fc") || lower.hasPrefix("fd") { return 2 }
+            return 0 // global v6
+        }
+        if text == "127.0.0.1" { return 4 }
+        return 1
+    }
+
+    ///
+    /// Dual-stack connect. Resolves `host` to ALL its addresses (both
+    /// families), ranks them best-first, and walks them with a shared time
+    /// budget — a dead AAAA costs a slice, never the transfer. `connect`'s
+    /// literal-IPv4 fast path is unchanged for the tunnel lanes.
+    ///
+    static func connectBest(host: String, port: UInt16, timeoutMs: Int32 = 8000) throws -> TCPConnection {
+        var candidates = addressCandidates(host: host)
+        if candidates.isEmpty {
+            // Hostname resolved to nothing (or no DNS): try it as a literal.
+            candidates = [host]
+        }
+        let ranked = candidates.sorted { addressRank($0) < addressRank($1) }
+        let perAddress = max(750, Int(timeoutMs) / max(1, ranked.count))
+        var lastError: Error = HyperSendError.socket("no addresses for \(host)")
+        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000)
+
+        for candidate in ranked {
+            guard Date() < deadline else { break }
+            guard let storage = resolveNumeric(candidate) else { continue }
+            do {
+                return try connect(storage: storage, host: candidate, port: port, timeoutMs: Int32(perAddress))
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError
+    }    /// One connect attempt against a prepared sockaddr (either family).
+    static func connect(storage: sockaddr_storage, host: String, port: UInt16, timeoutMs: Int32) throws -> TCPConnection {
+        var addr = storage
+        // The port lives at bytes 2–3 in both sockaddr_in and sockaddr_in6,
+        // and resolveNumeric leaves it zero — stamp it in here.
+        withUnsafeMutableBytes(of: &addr) { raw in
+            raw[2] = UInt8(port >> 8)
+            raw[3] = UInt8(port & 0xFF)
+        }
+        let family = Int32(addr.ss_family)
+        let sock = socket(family, SOCK_STREAM, 0)
+        guard sock >= 0 else { throw HyperSendError.socket("socket() failed")
+ }
+
+        var one: Int32 = 1
+        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, &one, socklen_t(MemoryLayout<Int32>.size))
+        var snd: Int32 = 4 * 1024 * 1024
+        setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &snd, socklen_t(MemoryLayout<Int32>.size))
+
+        let flags = fcntl(sock, F_GETFL, 0)
+        _ = fcntl(sock, F_SETFL, flags | O_NONBLOCK)
+        let addrLen = addr.ss_len
+        let rc = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.connect(sock, $0, socklen_t(addrLen))
+            }
+        }
+        if rc != 0 {
+            if errno != EINPROGRESS {
+                let e = errno
+                Darwin.close(sock)
+                throw HyperSendError.socket("connect \(host):\(port) failed (errno \(e))")
+            }
+            guard waitWritable(sock, timeoutMs: timeoutMs) else {
+                Darwin.close(sock)
+                throw HyperSendError.timedOut("connect \(host):\(port)")
+            }
+            var soErr: Int32 = 0
+            var len = socklen_t(MemoryLayout<Int32>.size)
+            getsockopt(sock, SOL_SOCKET, SO_ERROR, &soErr, &len)
+            if soErr != 0 {
+                Darwin.close(sock)
+                throw HyperSendError.socket("connect \(host):\(port) refused (errno \(soErr))")
+            }
+        }
+        _ = fcntl(sock, F_SETFL, flags)
+        return TCPConnection(fd: sock)
+    }
+
     func close() {
         if fd >= 0 {
             Darwin.close(fd)
@@ -336,6 +503,16 @@ final class TCPServer {
 
     init(port: UInt16, backlog: Int32 = 64) throws {
         self.port = port
+        // Dual-stack by preference: one socket on :: with IPV6_V6ONLY off
+        // accepts IPv6 AND IPv4 (v4 arrives as ::ffff:a.b.c.d mapped). The
+        // kernel does the mapping, so every existing IPv4 client — adb
+        // tunnels, loopback tests, the Node engine — behaves identically.
+        // Any failure falls back to the plain IPv4 bind, the historical path.
+        if let dual = try? TCPServer.makeDualStack(port: port, backlog: backlog) {
+            fd = dual
+            return
+        }
+
         let sock = socket(AF_INET, SOCK_STREAM, 0)
         guard sock >= 0 else { throw HyperSendError.socket("socket() failed") }
 
@@ -366,16 +543,55 @@ final class TCPServer {
         fd = sock
     }
 
-    /// The port actually bound — resolves ephemeral (:0) listeners.
+    /// Binds [::]:port with v6ONLY off. Returns the fd, or nil when the host
+    /// has no IPv6 support at all (rare on macOS).
+    private static func makeDualStack(port: UInt16, backlog: Int32) -> Int32? {
+        let sock = socket(AF_INET6, SOCK_STREAM, 0)
+        guard sock >= 0 else { return nil }
+
+        var one: Int32 = 1
+        var zero: Int32 = 0
+        setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, &one, socklen_t(MemoryLayout<Int32>.size))
+        // The whole point: keep v4-mapped addresses flowing through this one
+        // listener. Without this the v4 clients above would find the port dark.
+        setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &zero, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in6()
+        addr.sin6_family = sa_family_t(AF_INET6)
+        addr.sin6_port = port.bigEndian
+        addr.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
+
+        let rc = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                Darwin.bind(sock, $0, socklen_t(MemoryLayout<sockaddr_in6>.size))
+            }
+        }
+        guard rc == 0 else {
+            Darwin.close(sock)
+            return nil
+        }
+        guard Darwin.listen(sock, backlog) == 0 else {
+            Darwin.close(sock)
+            return nil
+        }
+        return sock
+    }
+
+    /// The port actually bound — resolves ephemeral (:0) listeners. Port sits
+    /// at bytes 2–3 of both sockaddr_in and sockaddr_in6, so one read covers
+    /// both families.
     var boundPort: UInt16 {
         guard fd >= 0 else { return port }
-        var addr = sockaddr_in()
-        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let rc = withUnsafeMutablePointer(to: &addr) { p in
+        var ss = sockaddr_storage()
+        var len = socklen_t(MemoryLayout<sockaddr_storage>.size)
+        let rc = withUnsafeMutablePointer(to: &ss) { p in
             p.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &len) }
         }
         guard rc == 0 else { return port }
-        return UInt16(bigEndian: addr.sin_port)
+        return withUnsafeBytes(of: &ss) { raw in
+            UInt16(raw[2]) << 8 | UInt16(raw[3])
+        }
     }
 
     /// Accepts one client, waiting at most `timeoutMs`. Returns a tuned
