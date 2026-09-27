@@ -9,6 +9,10 @@ import SwiftUI
 // right-aligned controls, tertiary footer text — because it *is* the macOS
 // Settings grammar. The system draws it, so it stays correct in light mode, dark
 // mode, and at every accessibility setting.
+//
+// The one deliberate departure is the toggle: `.glass` (Animations.swift)
+// instead of the stock switch, so every window in the app wears the same
+// material. Keyboard and VoiceOver behaviour still come from `Toggle` itself.
 
 enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
     case general, lanes, devices, receive, send, menuBar, advanced, about
@@ -102,7 +106,7 @@ struct SettingsView: View {
                 LabeledContent("Launch at login") {
                     Toggle("", isOn: $launchAtLogin)
                         .labelsHidden()
-                        .toggleStyle(.switch)
+                        .toggleStyle(.glass)
                         .onChange(of: launchAtLogin) { _, wanted in
                             // If the system refuses, snap the switch back rather
                             // than showing a state that is not true.
@@ -253,7 +257,7 @@ struct SettingsView: View {
                 LabeledContent("Accept automatically") {
                     Toggle("", isOn: $autoAccept)
                         .labelsHidden()
-                        .toggleStyle(.switch)
+                        .toggleStyle(.glass)
                         .onChange(of: autoAccept) { _, value in AppModel.shared.autoAccept = value }
                 }
                 // Both of these are read by the receiver when a file lands, so
@@ -262,13 +266,13 @@ struct SettingsView: View {
                 LabeledContent("Open after receiving") {
                     Toggle("", isOn: $openAfterReceive)
                         .labelsHidden()
-                        .toggleStyle(.switch)
+                        .toggleStyle(.glass)
                         .onChange(of: openAfterReceive) { _, value in AppModel.shared.openAfterReceive = value }
                 }
                 LabeledContent("Reveal in Finder") {
                     Toggle("", isOn: $revealInFinder)
                         .labelsHidden()
-                        .toggleStyle(.switch)
+                        .toggleStyle(.glass)
                         .onChange(of: revealInFinder) { _, value in AppModel.shared.revealInFinder = value }
                 }
             } footer: {
@@ -321,7 +325,7 @@ struct SettingsView: View {
                 LabeledContent("Show menu bar icon") {
                     Toggle("", isOn: $showMenuBarIcon)
                         .labelsHidden()
-                        .toggleStyle(.switch)
+                        .toggleStyle(.glass)
                         .onChange(of: showMenuBarIcon) { _, visible in
                             MenuBarItem.shared.setVisible(visible)
                         }

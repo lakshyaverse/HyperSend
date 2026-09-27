@@ -11,10 +11,23 @@ import SwiftUI
 // The model, the engine, the menus and the CLI are untouched: this file only
 // reads `AppModel` and draws it. Every behaviour the previous build had —
 // whole-window drag-and-drop, queueing, per-lane meter, queue counts — is here.
+//
+// Motion lives in `Animations.swift` and follows one rule: glass is a solid
+// with a memory. It bends, overshoots, and rings down; it never snaps. A drop
+// sends a radial ripple through every panel from the exact landing point, the
+// toggle's knob squishes and aftershakes, cards settle in with a keyframed
+// entrance, and idle glass breathes.
 
 struct HyperSendView: View {
     @Bindable var model: AppModel
     @State private var dropActive = false
+    /// The last drop: landing point (in window space) plus an order counter,
+    /// so two drops on the same pixel still re-trigger the ripple.
+    @State private var dropImpact: DropImpact?
+    @State private var dropOrder = 0
+    /// Increments every time a send is queued — drives the send button's
+    /// keyframed sheen sweep.
+    @State private var sendPulse = 0
 
     init(model: AppModel = .shared) {
         self._model = Bindable(model)
@@ -43,12 +56,30 @@ struct HyperSendView: View {
         .safeAreaInset(edge: .bottom, spacing: 0) {
             StatusBar(model: model)
         }
+        // The named space sits on the same node `dropDestination` measures
+        // its location against, so panels convert the drop point with no
+        // offset — one event, window-wide jiggle.
+        .coordinateSpace(name: RippleSpace.name)
         .overlay {
-            if dropActive { DropTargetOutline() }
+            ZStack {
+                if dropActive { DropTargetOutline() }
+                // Concentric ripple rings from the exact landing point — the
+                // hero motif answering the drop, wherever it happened.
+                if let impact = dropImpact {
+                    RippleRings(impact: impact)
+                        .position(x: impact.point.x, y: impact.point.y)
+                        .id(impact)
+                }
+            }
         }
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: dropActive)
         .animation(.spring(response: 0.42, dampingFraction: 0.86), value: model.transfers.count)
-        .dropDestination(for: URL.self) { urls, _ in
+        .dropDestination(for: URL.self) { urls, location in
+            // `location` arrives in this view's own coordinates; named-space
+            // frames are measured in the same space, so pass it through.
+            dropOrder += 1
+            dropImpact = DropImpact(point: location, order: dropOrder)
+            sendPulse += 1
             model.send(urls: urls)
             return true
         } isTargeted: { targeted in
@@ -61,14 +92,17 @@ struct HyperSendView: View {
     /// branch above stays a one-liner.
     private var content: some View {
         HStack(spacing: UI.Space.s) {
-            DeviceSidebar(model: model)
+            DeviceSidebar(model: model, sendPulse: sendPulse)
                 .frame(width: 208)
+                .glassRipple(impact: dropImpact, intensity: 0.7)
 
-            TransferSurface(model: model)
+            TransferSurface(model: model, impact: dropImpact)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .glassRipple(impact: dropImpact)
 
             Inspector(model: model)
                 .frame(width: 250)
+                .glassRipple(impact: dropImpact, intensity: 0.6)
         }
     }
 }
@@ -159,6 +193,9 @@ private struct Grain: View {
 /// selected device shows its host; the cable glyph marks a USB-capable peer.
 private struct DeviceSidebar: View {
     @Bindable var model: AppModel
+    /// Drives the send button's keyframed sheen sweep; owned by the root so a
+    /// drop can fire it too.
+    var sendPulse: Int = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: UI.Space.m) {
@@ -203,13 +240,14 @@ private struct DeviceSidebar: View {
                         .font(UI.Text.caption)
                         .foregroundStyle(.secondary)
                 } else {
-                    ForEach(model.peers, id: \.key) { peer in
+                    ForEach(Array(model.peers.enumerated()), id: \.element.key) { index, peer in
                         DeviceRow(
                             peer: peer,
                             selected: model.selectedPeerKey == peer.key,
                         ) {
                             model.selectedPeerKey = peer.key
                         }
+                        .glassEntrance(delay: Double(index) * 0.05)
                     }
                 }
 
@@ -247,6 +285,7 @@ private struct DeviceSidebar: View {
             }
             .disabled(model.selectedPeer == nil)
             .opacity(model.selectedPeer == nil ? 0.55 : 1)
+            .modifier(SheenSweep(trigger: sendPulse, cornerRadius: UI.Radius.control))
             .help(model.selectedPeer == nil ? "No device to send to yet" : "Send files or folders")
         }
         .padding(UI.Space.s)
@@ -261,6 +300,11 @@ private struct DeviceRow: View {
     let action: () -> Void
 
     var body: some View {
+        button
+            .selectionPop(trigger: selected)
+    }
+
+    private var button: some View {
         Button(action: action) {
             HStack(spacing: UI.Space.xs) {
                 Image(systemName: peer.usbReachable ? "cable.connector" : "iphone")
@@ -301,12 +345,13 @@ private struct DeviceRow: View {
 /// something is moving.
 private struct TransferSurface: View {
     var model: AppModel
+    var impact: DropImpact?
 
     var body: some View {
         if model.transfers.isEmpty {
             DropWell(model: model)
         } else {
-            TransferList(model: model)
+            TransferList(model: model, impact: impact)
         }
     }
 }
@@ -320,6 +365,8 @@ private struct DropWell: View {
         VStack(spacing: UI.Space.m) {
             ConcentricRings()
                 .frame(width: 168, height: 168)
+                .ambientBreath(depth: 0.014)
+                .bob(amplitude: 3, period: 1.15)
 
             VStack(spacing: UI.Space.xxs) {
                 Text(headline)
@@ -389,12 +436,14 @@ private struct ConcentricRings: View {
 
 private struct TransferList: View {
     var model: AppModel
+    var impact: DropImpact?
 
     var body: some View {
         ScrollView {
             VStack(spacing: UI.Space.xs) {
-                ForEach(model.transfers.reversed()) { item in
-                    TransferCard(item: item)
+                ForEach(Array(model.transfers.reversed().enumerated()), id: \.element.id) { index, item in
+                    TransferCard(item: item, impact: impact)
+                        .glassEntrance(delay: Double(index) * 0.05)
                 }
             }
             .padding(UI.Space.xxs)
@@ -406,8 +455,16 @@ private struct TransferList: View {
 /// settled — the lane meter disappears once it has nothing to say.
 private struct TransferCard: View {
     let item: TransferItem
+    var impact: DropImpact?
+    /// Counts up on every status change — triggers the verified sheen sweep.
+    @State private var statusCount = 0
 
     var body: some View {
+        card
+            .glassRipple(impact: impact, intensity: 0.45)
+    }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: UI.Space.xs) {
             HStack(alignment: .center, spacing: UI.Space.xs) {
                 Image(systemName: item.direction == .send ? "arrow.up" : "arrow.down")
@@ -443,6 +500,7 @@ private struct TransferCard: View {
 
             if isRunning {
                 LaneBar(segments: segments, total: item.size)
+                    .overlay(LaneShimmer().clipShape(RoundedRectangle(cornerRadius: UI.Radius.bar, style: .continuous)))
                     .help(laneBreakdown)
                 if segments.count > 1 {
                     laneLegend
@@ -462,6 +520,12 @@ private struct TransferCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .glassCard()
         .animation(.linear(duration: 0.2), value: item.bytesDone)
+        .modifier(SheenSweep(trigger: statusCount, cornerRadius: UI.Radius.card))
+        .onChange(of: item.status) {
+            // Every milestone — queued → active, active → verifying, verifying
+            // → done/failed — sends one sweep of light across the card.
+            statusCount += 1
+        }
     }
 
     // MARK: Derived
@@ -495,6 +559,7 @@ private struct TransferCard: View {
                     Text(formattedRate(item.laneRates[segment.label] ?? 0))
                         .font(UI.Text.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
+                        .modifier(StatusPulse(trigger: item.laneRates[segment.label] ?? 0))
                 }
             }
             Spacer(minLength: 0)
@@ -559,6 +624,13 @@ private struct LaneBar: View {
     let total: Int64
 
     var body: some View {
+        meter
+            // A late segment joining the split slides the existing ones over
+            // instead of teleporting them.
+            .animation(.spring(response: 0.4, dampingFraction: 0.9), value: segments.map(\.label))
+    }
+
+    private var meter: some View {
         GeometryReader { proxy in
             let width = proxy.size.width
             let denominator = CGFloat(max(total, 1))
@@ -588,27 +660,7 @@ private struct Inspector: View {
         ScrollView {
             VStack(alignment: .leading, spacing: UI.Space.s) {
                 inspectorSection("Activity") {
-                    if model.transfers.isEmpty {
-                        Text("Nothing in flight.")
-                            .font(UI.Text.caption)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        let active = model.transfers.filter { !$0.status.isTerminal }
-                        let done = model.transfers.filter(\.status.isTerminal)
-                        HStack {
-                            Text("\(active.count) active")
-                                .font(UI.Text.caption)
-                            Spacer()
-                            Text("\(done.count) done")
-                                .font(UI.Text.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                        if model.queuedCount > 0 {
-                            Text("\(model.queuedCount) queued")
-                                .font(UI.Text.caption)
-                                .foregroundStyle(.secondary)
-                        }
-                    }
+                    ActivityCounter(model: model)
                 }
 
                 inspectorSection("Lanes") {
@@ -618,6 +670,7 @@ private struct Inspector: View {
                         ready: model.usbLaneReady,
                         detail: model.usbLaneReady ? "tunnel open" : "not connected",
                     )
+                    .modifier(StatusPulse(trigger: model.usbLaneReady))
                 }
 
                 inspectorSection("Receive") {
@@ -644,8 +697,7 @@ private struct Inspector: View {
                     }
                     Toggle("Accept automatically", isOn: $model.autoAccept)
                         .font(UI.Text.caption)
-                        .toggleStyle(.switch)
-                        .controlSize(.mini)
+                        .toggleStyle(.glass)
                 }
             }
             .padding(UI.Space.s)
@@ -672,9 +724,11 @@ private struct Inspector: View {
             Circle()
                 .fill(ready ? Color(nsColor: .systemGreen) : Color.secondary.opacity(0.4))
                 .frame(width: 7, height: 7)
+                .modifier(StatusPulse(trigger: ready))
             Text(detail)
                 .font(UI.Text.caption)
                 .foregroundStyle(.secondary)
+                .modifier(StatusPulse(trigger: detail))
         }
     }
 
@@ -706,6 +760,8 @@ private struct StatusBar: View {
             Circle()
                 .fill(indicatorTint)
                 .frame(width: 6, height: 6)
+                .modifier(StatusPulse(trigger: indicatorTint))
+                .animation(.spring(response: 0.3, dampingFraction: 0.8), value: indicatorTint)
 
             Text(model.statusText)
                 .font(UI.Text.caption)
@@ -769,6 +825,44 @@ private struct StatusBar: View {
     }
 }
 
+// MARK: - Activity counter
+
+/// "N active · N done". Extracted so it owns its own pulse trigger: the
+/// counts pop in place whenever activity changes, instead of silently
+/// swapping digits. Reads the model; owns no behaviour.
+private struct ActivityCounter: View {
+    var model: AppModel
+
+    var body: some View {
+        Group {
+            if model.transfers.isEmpty {
+                Text("Nothing in flight.")
+                    .font(UI.Text.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                let active = model.transfers.filter { !$0.status.isTerminal }
+                let done = model.transfers.filter(\.status.isTerminal)
+                VStack(alignment: .leading, spacing: UI.Space.xxs) {
+                    HStack {
+                        Text("\(active.count) active")
+                            .font(UI.Text.caption)
+                        Spacer()
+                        Text("\(done.count) done")
+                            .font(UI.Text.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    if model.queuedCount > 0 {
+                        Text("\(model.queuedCount) queued")
+                            .font(UI.Text.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .modifier(StatusPulse(trigger: model.transfers.map(\.status)))
+            }
+        }
+    }
+}
+
 // MARK: - Liquid Glass button + magnetic feel
 
 /// A button on real system Liquid Glass. On macOS 26+ the label is wrapped in
@@ -780,8 +874,14 @@ struct MagneticGlassButton<Action: View>: View {
 
     @State private var hover = false
     @State private var lean: CGSize = .zero
+    @State private var pressCount = 0
 
     var body: some View {
+        base
+            .pressJiggle(trigger: pressCount)
+    }
+
+    private var base: some View {
         Group {
             if #available(macOS 26.0, *) {
                 glass(button)
@@ -818,7 +918,10 @@ struct MagneticGlassButton<Action: View>: View {
     /// focused, `.disabled` from the caller actually stops the action, and
     /// VoiceOver reads it as a button.
     private var button: some View {
-        Button(action: action) {
+        Button {
+            pressCount += 1
+            action()
+        } label: {
             label()
                 .contentShape(RoundedRectangle(cornerRadius: UI.Radius.control, style: .continuous))
         }
@@ -848,6 +951,59 @@ private struct DropTargetOutline: View {
             .padding(5)
             .allowsHitTesting(false)
             .transition(.opacity)
+    }
+}
+
+// MARK: - Drop ripple rings
+
+/// Concentric rings expanding from the exact landing point — the hero well's
+/// motif, answering a drop wherever it happened. Bright head, fading tail,
+/// scale + opacity keyframed once per drop.
+private struct RippleRings: View {
+    let impact: DropImpact
+
+    private struct Burst {
+        var scale: CGFloat = 0.2
+        var opacity: Double = 0
+    }
+
+    @State private var play = 0
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(.white.opacity(0.9), lineWidth: 1.5)
+            Circle()
+                .strokeBorder(.white.opacity(0.55), lineWidth: 1)
+                .scaleEffect(0.66)
+            Circle()
+                .fill(
+                    RadialGradient(
+                        colors: [.white.opacity(0.85), .white.opacity(0)],
+                        center: .center, startRadius: 1, endRadius: 33,
+                    ),
+                )
+        }
+        .frame(width: 64, height: 64)
+        // One keyframed burst per drop: the ring pair springs outward while
+        // the bloom fades — then everything rests invisible until the next.
+        // (`.id(impact)` at the call site re-inserts the view per drop, so
+        // `onAppear` alone would do — the counter keeps it self-contained.)
+        .keyframeAnimator(initialValue: Burst(), trigger: play) { rings, burst in
+            rings
+                .scaleEffect(burst.scale)
+                .opacity(burst.opacity)
+        } keyframes: { _ in
+            KeyframeTrack(\.scale) {
+                SpringKeyframe(1.0, duration: 0.55, spring: .bouncy)
+            }
+            KeyframeTrack(\.opacity) {
+                LinearKeyframe(0.9, duration: 0.06)
+                LinearKeyframe(0.0, duration: 0.50)
+            }
+        }
+        .onAppear { play += 1 }
+        .allowsHitTesting(false)
     }
 }
 
