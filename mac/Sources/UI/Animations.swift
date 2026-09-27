@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 
 // MARK: - Keyframed glass animations
 //
@@ -6,15 +7,60 @@ import SwiftUI
 // physics metaphor throughout: glass is a solid with a memory — it bends,
 // overshoots, and rings down, never snapping.
 //
-//   * Drop ripple — a GeometryEffect whose `animatableData` is an animated
-//     phase counter; SwiftUI re-evaluates the effect every frame, and the
-//     radial wave it computes jiggles every panel from the exact drop point.
+// A drop is two coordinated systems:
+//
+//   * Whole-window refraction (`DropRefractionModifier` + `Shaders.metal`):
+//     a Metal distortion effect warps the *rendered pixels* of everything —
+//     scene, panels, glass, chrome — as a travelling ring wavefront from the
+//     drop point. Light genuinely bends: the sky smears, rims bow, text
+//     wobbles. A synced SwiftUI light layer paints the crest highlight, the
+//     trough shadow and the impact bloom.
+//   * Per-panel wobble (`DropRippleEffect`): each glass panel is physically
+//     pushed, heaved and squash-and-stretched, strongest where the drop
+//     landed, falling off with distance — the panels are objects floating on
+//     the water that the shader ripples.
+//
 //   * Toggle — a custom `ToggleStyle` on real glass; the knob squishes and
 //     aftershakes on a KeyframeTrack timeline.
 //   * Entrances, press jiggle, sheen sweeps, status pulses — all keyframed.
 //
 // Nothing here touches AppModel: pure presentation, so the engine stays
 // logic-free and the views stay read-and-draw.
+
+// MARK: - Ripple bus
+
+/// The drop event bus. Views read it to run their piece of the choreography;
+/// `HyperSendView` fires it from the real drop handler (or the test hook).
+/// One fire, whole-window response.
+@Observable
+final class RippleController {
+    static let shared = RippleController()
+
+    /// Counts up per drop; anything keyed on it re-plays.
+    private(set) var impactID = 0
+    /// Drop point in the window's own coordinate space (what
+    /// `dropDestination` hands over).
+    private(set) var origin: CGPoint = .zero
+    /// When the drop landed — the shader's clock zero.
+    private(set) var firedAt: Date = .distantPast
+
+    var hasImpact: Bool { impactID > 0 }
+
+    /// The wave's travel distance in points; the shader scales it for Retina.
+    static let maxRadius: CGFloat = 430
+    /// Seconds the full refraction choreography runs.
+    static let duration: Double = 1.6
+    /// Widens the distortion effect's render target so the kernel can pull
+    /// samples from outside its bounds; covers the worst-case displacement
+    /// the shader computes (≈35 pt at the crest).
+    static let maxSampleOffset = CGSize(width: 40, height: 40)
+
+    func fire(at point: CGPoint) {
+        origin = point
+        firedAt = Date()
+        impactID += 1
+    }
+}
 
 // MARK: - Drop impact
 
@@ -30,14 +76,152 @@ struct DropImpact: Equatable, Hashable {
     var order: Int
 }
 
-// MARK: - Drop-point ripple
+extension Notification.Name {
+    /// Testing hook: posted by the `HS_SIM_DROP` launch path to run the exact
+    /// visual choreography of a real drop at a given point, without files.
+    static let hyperSendSimDrop = Notification.Name("HyperSendSimDrop")
+}
 
-/// Displaces a panel as a damped radial wave radiating from where the file
-/// landed. `animatableData` is the animated phase: as it sweeps 0→1, SwiftUI
-/// re-evaluates `effectValue` on every frame, producing the wave. Falloff is
-/// measured from the panel's nearest edge to the drop point, so the panel
-/// under the file jolts hardest and neighbours shimmy as the wave reaches
-/// them — the whole window reads as one piece of glass.
+// MARK: - Scene refraction (Metal)
+
+/// Warps the *scene backdrop* — never the glass above it. While a ripple
+/// runs, a `TimelineView` drives the shader's clock and the Metal
+/// `dropRefraction` distortion bends the sky as a decaying water-ring from
+/// the drop point; every glass panel lenses that moving scene, so the light
+/// entering the glass visibly bends.
+///
+/// This layering is a hard constraint, learned the hard way: wrapping the
+/// whole window (glass included) in a distortion makes the system's real
+/// Liquid Glass views fail to composite — the panels render blank for the
+/// duration of the effect. Bending only the backdrop beneath the glass is
+/// both safe and the physically correct order (light refracts as it *enters*
+/// the material, so what must warp is what sits behind it).
+struct DropRefractionModifier: ViewModifier {
+    var controller: RippleController
+
+    func body(content: Content) -> some View {
+        if #available(macOS 14.0, *) {
+            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !controller.hasImpact)) { timeline in
+                let elapsed = controller.hasImpact
+                    ? timeline.date.timeIntervalSince(controller.firedAt)
+                    : 0.0
+                let running = controller.hasImpact && elapsed < RippleController.duration
+                content
+                    // A *distortion* effect: the kernel maps displayed
+                    // position → source position (a warp). The kernel comes
+                    // from the build-time-compiled default metallib —
+                    // `Shaders.metal` exports it as [[stitchable]].
+                    .distortionEffect(
+                        Shader(
+                            function: ShaderFunction(library: .default, name: "dropRefraction"),
+                            arguments: [
+                                .float(Float(elapsed)),
+                                // Shader user space is points (Y down); the
+                                // drop point arrives in points.
+                                .float(Float(controller.origin.x)),
+                                .float(Float(controller.origin.y)),
+                                .float(Float(RippleController.maxRadius)),
+                            ],
+                        ),
+                        maxSampleOffset: RippleController.maxSampleOffset,
+                        isEnabled: running,
+                    )
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// The light of a refraction, painted above the glass in the window overlay:
+/// a bright crest riding the wavefront, a dark trough just behind it, and the
+/// splash bloom at the impact. Radius formula mirrors `dropRefraction` in
+/// Shaders.metal exactly — both describe the same wavefront.
+struct RefractionLight: View {
+    var controller: RippleController
+
+    var body: some View {
+        if controller.hasImpact {
+            TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !controller.hasImpact)) { timeline in
+                let elapsed = timeline.date.timeIntervalSince(controller.firedAt)
+                if elapsed >= 0, elapsed < RippleController.duration {
+                    Canvas { context, size in
+                        let clamped = min(elapsed / 1.5, 1.0)
+                        // Same curve as the shader: fast start, long tail.
+                        let radius = RippleController.maxRadius * (1.0 - pow(1.0 - clamped, 3.0))
+                        // Same decay as the shader.
+                        let energy = exp(-elapsed * 2.1) * (1.0 - smoothstep(0.0, 1.45, elapsed))
+                        guard energy > 0.003 else { return }
+
+                        // Trough: dim ring just behind the crest.
+                        let troughRect = CGRect(
+                            x: controller.origin.x - radius + 24,
+                            y: controller.origin.y - radius + 24,
+                            width: (radius - 24) * 2,
+                            height: (radius - 24) * 2,
+                        )
+                        context.drawLayer { layer in
+                            layer.addFilter(.blur(radius: 14))
+                            layer.stroke(
+                                Path(ellipseIn: troughRect),
+                                with: .color(.black.opacity(0.14 * energy)),
+                                lineWidth: 20,
+                            )
+                        }
+
+                        // Crest: light gathering at the wavefront.
+                        let crestRect = CGRect(
+                            x: controller.origin.x - radius,
+                            y: controller.origin.y - radius,
+                            width: radius * 2,
+                            height: radius * 2,
+                        )
+                        context.drawLayer { layer in
+                            layer.addFilter(.blur(radius: 16))
+                            layer.stroke(
+                                Path(ellipseIn: crestRect),
+                                with: .color(.white.opacity(0.40 * energy)),
+                                lineWidth: 28,
+                            )
+                        }
+
+                        // Splash: the bloom where the drop landed.
+                        let splash = CGRect(
+                            x: controller.origin.x - 48,
+                            y: controller.origin.y - 48,
+                            width: 96,
+                            height: 96,
+                        )
+                        context.fill(
+                            Path(ellipseIn: splash),
+                            with: .color(.white.opacity(0.5 * min(1, energy * 3))),
+                        )
+                    }
+                    .allowsHitTesting(false)
+                }
+            }
+        }
+    }
+
+    /// GL-style smoothstep, matching the shader's falloff.
+    private func smoothstep(_ a: Double, _ b: Double, _ x: Double) -> Double {
+        let t = min(max((x - a) / (b - a), 0), 1)
+        return t * t * (3 - 2 * t)
+    }
+}
+
+/// The light of a refraction: a bright crest riding the wavefront, a dark
+/// trough just behind it, and the splash bloom at the impact. The radius
+/// formula mirrors `dropRefraction` in Shaders.metal exactly — both describe
+/// the same wavefront, one bends the pixels, the other lights it.
+// MARK: - Per-panel wobble
+
+/// Physically displaces a panel as a damped radial wave radiating from where
+/// the file landed. `animatableData` is the animated phase: as it sweeps
+/// 0→1, SwiftUI re-evaluates `effectValue` on every frame, producing the
+/// wave. Falloff is measured from the panel's nearest edge to the drop
+/// point, so the panel under the file jolts hardest and neighbours move as
+/// the wave reaches them — objects floating on the water the shader ripples.
 ///
 /// Presentation only: it never changes layout, so drop handling, hit testing
 /// and VoiceOver geometry are untouched.
@@ -67,19 +251,20 @@ struct DropRippleEffect: GeometryEffect {
         let nearestY = min(max(origin.y, 0), bounds.height)
         let edgeDistance = ((origin.x - nearestX) * (origin.x - nearestX)
             + (origin.y - nearestY) * (origin.y - nearestY)).squareRoot()
-        let reach: CGFloat = 320
+        let reach: CGFloat = 360
         let u = min(1, edgeDistance / reach)
         let falloff = (1 - u) * (1 - u)
 
-        // The wave: 2¼ oscillations decaying to rest, plus one outward heave
-        // — the surface bulging toward the impact and settling back.
-        let wave = sin(progress * .pi * 4.5) * (1 - progress)
-        let amplitude = 6.0 * intensity * falloff
-        let squash = amplitude * wave * 0.011
-        let push = amplitude * sin(progress * .pi)
+        // The wave: three visible oscillations decaying to rest — glass
+        // heaved by the impact and ringing down.
+        let decay = pow(1 - progress, 1.3)
+        let wave = sin(progress * .pi * 6) * decay
+        let amplitude = 13.0 * intensity * falloff
+        let squash = amplitude * wave * 0.016
+        let push = amplitude * sin(progress * .pi) * 0.9
 
         // Push direction: from the panel's centre toward the drop point, so
-        // neighbour panels lean toward the impact like surface tension.
+        // panels lean toward the impact like surface tension pulling.
         let centreX = origin.x - bounds.width / 2
         let centreY = origin.y - bounds.height / 2
         let centreDistance = max((centreX * centreX + centreY * centreY).squareRoot(), 1)
@@ -97,19 +282,18 @@ struct DropRippleEffect: GeometryEffect {
     }
 }
 
-/// Applies the drop ripple to one view (a panel). The point arrives in
-/// `RippleSpace`; each host converts it into its own coordinates, which is
-/// what lets every panel compute its own falloff from the same event.
+/// Applies the drop wobble to one view (a panel). The host exists from first
+/// render — with a sentinel impact when none has happened yet — so the first
+/// real drop is an `onChange` on an existing view and always fires. The
+/// point arrives in `RippleSpace`; each host converts it into its own
+/// coordinates, which is what lets every panel compute its own falloff from
+/// the same event.
 struct GlassRipple: ViewModifier {
     var impact: DropImpact?
     var intensity: CGFloat = 1
 
     func body(content: Content) -> some View {
-        if let impact {
-            RippleHost(impact: impact, intensity: intensity, content: content)
-        } else {
-            content
-        }
+        RippleHost(impact: impact, intensity: intensity, content: content)
     }
 }
 
@@ -122,7 +306,7 @@ extension View {
 }
 
 private struct RippleHost<Content: View>: View {
-    var impact: DropImpact
+    var impact: DropImpact?
     var intensity: CGFloat
     var content: Content
 
@@ -133,10 +317,17 @@ private struct RippleHost<Content: View>: View {
     @State private var frameInSpace: CGRect = .zero
 
     var body: some View {
+        // The sentinel keeps the host (and its captured frame) alive from
+        // first render, so the first drop is always a change on an existing
+        // view — never a lost birth animation.
+        let effective = impact ?? DropImpact(point: .zero, order: -1)
         content
             .modifier(DropRippleEffect(
                 progress: phase - phase.rounded(.down),
-                origin: CGPoint(x: impact.point.x - frameInSpace.minX, y: impact.point.y - frameInSpace.minY),
+                origin: CGPoint(
+                    x: effective.point.x - frameInSpace.minX,
+                    y: effective.point.y - frameInSpace.minY,
+                ),
                 bounds: frameInSpace.size,
                 intensity: intensity,
             ))
@@ -144,20 +335,21 @@ private struct RippleHost<Content: View>: View {
                 GeometryReader { proxy in
                     Color.clear
                         .onAppear { frameInSpace = proxy.frame(in: .named(RippleSpace.name)) }
-                        .onChange(of: proxy.size) { _, _ in
-                            frameInSpace = proxy.frame(in: .named(RippleSpace.name))
+                        .onChange(of: proxy.frame(in: .named(RippleSpace.name))) { _, frame in
+                            frameInSpace = frame
                         }
                 }
             }
-            // The host only exists while an impact does, so appearing *is*
-            // the first drop — fire then, and on every change after. A card
-            // materialised out of the drop settles at the same point.
-            .onAppear { fire() }
+            .onAppear {
+                // A view born *out of* a drop — a transfer card materialising
+                // from it — settles at the landing point.
+                if impact != nil { fire() }
+            }
             .onChange(of: impact) { fire() }
     }
 
     private func fire() {
-        withAnimation(.easeOut(duration: 0.55)) { phase += 1 }
+        withAnimation(.easeOut(duration: 1.0)) { phase += 1 }
     }
 }
 

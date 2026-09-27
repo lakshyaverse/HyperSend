@@ -248,6 +248,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
+        // Testing hook: `HS_SIM_DROP=x,y` (points, window space) schedules a
+        // simulated drop at that point after a delay, so the drop choreography
+        // can be screen-recorded and measured without a real drag session.
+        // Posts a notification the main view listens for; no files move.
+        if let sim = ProcessInfo.processInfo.environment["HS_SIM_DROP"] {
+            let parts = sim.split(separator: ",")
+            let x = parts.count > 0 ? Double(parts[0]) ?? 0 : 0
+            let y = parts.count > 1 ? Double(parts[1]) ?? 0 : 0
+            let delay = parts.count > 2 ? Double(parts[2]) ?? 2.0 : 2.0
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                NotificationCenter.default.post(
+                    name: .hyperSendSimDrop,
+                    object: nil,
+                    userInfo: ["point": CGPoint(x: x, y: y)],
+                )
+            }
+        }
+
         // Self-report so a headless shell can confirm the window really came up
         // (screencapture needs Screen Recording permission we may not have).
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {

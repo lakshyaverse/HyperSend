@@ -35,8 +35,11 @@ struct HyperSendView: View {
 
     var body: some View {
         ZStack {
+            // The water: only the scene backdrop is warped by the drop
+            // shader — never the glass above it (see DropRefractionModifier).
             SceneBackdrop()
                 .ignoresSafeArea()
+                .modifier(DropRefractionModifier(controller: .shared))
 
             // One container for every glass shape in the window: neighbouring
             // panels lens as a group, the way the system's own chrome does.
@@ -63,10 +66,14 @@ struct HyperSendView: View {
         .overlay {
             ZStack {
                 if dropActive { DropTargetOutline() }
-                // Concentric ripple rings from the exact landing point — the
-                // hero motif answering the drop, wherever it happened.
+                // The refraction's light: crest, trough and splash, drawn
+                // above the glass from the same wavefront formula as the
+                // shader bending the scene beneath it.
+                RefractionLight(controller: .shared)
+                // The splash: expanding ring, droplet crown, core flash at
+                // the exact landing point.
                 if let impact = dropImpact {
-                    RippleRings(impact: impact)
+                    RefractionBurst(impact: impact)
                         .position(x: impact.point.x, y: impact.point.y)
                         .id(impact)
                 }
@@ -75,10 +82,15 @@ struct HyperSendView: View {
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: dropActive)
         .animation(.spring(response: 0.42, dampingFraction: 0.86), value: model.transfers.count)
         .dropDestination(for: URL.self) { urls, location in
-            // `location` arrives in this view's own coordinates; named-space
-            // frames are measured in the same space, so pass it through.
+            // `location` arrives in this view's own coordinates — the named
+            // ripple space — in points. Panels read it directly; the shader
+            // scales it to pixels itself.
             dropOrder += 1
-            dropImpact = DropImpact(point: location, order: dropOrder)
+            let impact = DropImpact(point: location, order: dropOrder)
+            dropImpact = impact
+            // The bus drives the whole-window Metal refraction; `dropImpact`
+            // drives the per-panel wobble and the splash.
+            RippleController.shared.fire(at: location)
             sendPulse += 1
             model.send(urls: urls)
             return true
@@ -86,6 +98,15 @@ struct HyperSendView: View {
             dropActive = targeted
         }
         .frame(minWidth: 760, minHeight: 480)
+        // Testing hook (HS_SIM_DROP): runs the identical visual path a real
+        // drop runs — impact bus, panel wobble, splash — at a posted point.
+        .onReceive(NotificationCenter.default.publisher(for: .hyperSendSimDrop)) { note in
+            guard let point = note.userInfo?["point"] as? CGPoint else { return }
+            dropOrder += 1
+            dropImpact = DropImpact(point: point, order: dropOrder)
+            RippleController.shared.fire(at: point)
+            sendPulse += 1
+        }
     }
 
     /// Everything that floats on the scene, extracted so the availability
@@ -954,56 +975,152 @@ private struct DropTargetOutline: View {
     }
 }
 
-// MARK: - Drop ripple rings
+// MARK: - Drop splash
 
-/// Concentric rings expanding from the exact landing point — the hero well's
-/// motif, answering a drop wherever it happened. Bright head, fading tail,
-/// scale + opacity keyframed once per drop.
-private struct RippleRings: View {
+/// The splash at the impact point, drawn above everything: an expanding ring,
+/// a crown of droplets bursting outward, and the core flash. The refraction
+/// (the bending itself) is the Metal layer; this is the water answering —
+/// fast, bright, gone. Every piece is keyframed once per drop; `.id(impact)`
+/// at the call site re-inserts the whole burst per drop.
+private struct RefractionBurst: View {
     let impact: DropImpact
 
-    private struct Burst {
-        var scale: CGFloat = 0.2
+    var body: some View {
+        ZStack {
+            SplashRing()
+            ForEach(SplashDroplet.crown) { droplet in
+                SplashDropletView(droplet: droplet)
+            }
+            SplashCore()
+        }
+        .frame(width: 220, height: 220)
+        .allowsHitTesting(false)
+    }
+}
+
+/// One droplet's ballistic angle, range, size and stagger. Hand-laid so the
+/// crown is identical every time — designed, not noisy.
+private struct SplashDroplet: Identifiable {
+    let id: Int
+    let angle: Double
+    let distance: CGFloat
+    let size: CGFloat
+    let delay: Double
+
+    static let crown: [SplashDroplet] = [
+        SplashDroplet(id: 0, angle: 0.00, distance: 40, size: 4.5, delay: 0.00),
+        SplashDroplet(id: 1, angle: 0.85, distance: 30, size: 3.0, delay: 0.02),
+        SplashDroplet(id: 2, angle: 1.65, distance: 44, size: 5.0, delay: 0.01),
+        SplashDroplet(id: 3, angle: 2.45, distance: 28, size: 3.5, delay: 0.04),
+        SplashDroplet(id: 4, angle: 3.20, distance: 42, size: 4.0, delay: 0.00),
+        SplashDroplet(id: 5, angle: 4.00, distance: 32, size: 3.0, delay: 0.03),
+        SplashDroplet(id: 6, angle: 4.80, distance: 46, size: 5.5, delay: 0.02),
+        SplashDroplet(id: 7, angle: 5.60, distance: 30, size: 3.5, delay: 0.05),
+    ]
+}
+
+/// The expanding ring: the wavefront's birth, brighter and faster than the
+/// shader crest it hands off to.
+private struct SplashRing: View {
+    private struct RingShape {
+        var scale: CGFloat = 0.12
+        var opacity: Double = 0.85
+    }
+
+    @State private var play = 0
+
+    var body: some View {
+        Circle()
+            .strokeBorder(.white.opacity(0.9), lineWidth: 2)
+            .frame(width: 120, height: 120)
+            .keyframeAnimator(initialValue: RingShape(), trigger: play) { ring, value in
+                ring
+                    .scaleEffect(value.scale)
+                    .opacity(value.opacity)
+            } keyframes: { _ in
+                KeyframeTrack(\.scale) {
+                    SpringKeyframe(1.0, duration: 0.5, spring: .bouncy)
+                }
+                KeyframeTrack(\.opacity) {
+                    LinearKeyframe(0.85, duration: 0.05)
+                    LinearKeyframe(0.0, duration: 0.45)
+                }
+            }
+            .onAppear { play += 1 }
+    }
+}
+
+/// A droplet popping outward along its angle and fading as it flies.
+private struct SplashDropletView: View {
+    let droplet: SplashDroplet
+
+    private struct Flight {
+        var progress: CGFloat = 0
         var opacity: Double = 0
     }
 
     @State private var play = 0
 
     var body: some View {
-        ZStack {
-            Circle()
-                .strokeBorder(.white.opacity(0.9), lineWidth: 1.5)
-            Circle()
-                .strokeBorder(.white.opacity(0.55), lineWidth: 1)
-                .scaleEffect(0.66)
-            Circle()
-                .fill(
-                    RadialGradient(
-                        colors: [.white.opacity(0.85), .white.opacity(0)],
-                        center: .center, startRadius: 1, endRadius: 33,
-                    ),
-                )
-        }
-        .frame(width: 64, height: 64)
-        // One keyframed burst per drop: the ring pair springs outward while
-        // the bloom fades — then everything rests invisible until the next.
-        // (`.id(impact)` at the call site re-inserts the view per drop, so
-        // `onAppear` alone would do — the counter keeps it self-contained.)
-        .keyframeAnimator(initialValue: Burst(), trigger: play) { rings, burst in
-            rings
-                .scaleEffect(burst.scale)
-                .opacity(burst.opacity)
-        } keyframes: { _ in
-            KeyframeTrack(\.scale) {
-                SpringKeyframe(1.0, duration: 0.55, spring: .bouncy)
+        Circle()
+            .fill(.white.opacity(0.9))
+            .frame(width: droplet.size, height: droplet.size)
+            .shadow(color: .white.opacity(0.6), radius: 2)
+            .keyframeAnimator(initialValue: Flight(), trigger: play) { drop, value in
+                drop
+                    .offset(
+                        x: cos(droplet.angle) * droplet.distance * value.progress,
+                        y: sin(droplet.angle) * droplet.distance * value.progress,
+                    )
+                    .opacity(value.opacity)
+                    .scaleEffect(1 - 0.4 * value.progress)
+            } keyframes: { _ in
+                KeyframeTrack(\.progress) {
+                    LinearKeyframe(0, duration: droplet.delay)
+                    SpringKeyframe(1.0, duration: 0.42, spring: .bouncy)
+                }
+                KeyframeTrack(\.opacity) {
+                    LinearKeyframe(1.0, duration: droplet.delay + 0.04)
+                    LinearKeyframe(0.0, duration: 0.38)
+                }
             }
-            KeyframeTrack(\.opacity) {
-                LinearKeyframe(0.9, duration: 0.06)
-                LinearKeyframe(0.0, duration: 0.50)
+            .onAppear { play += 1 }
+    }
+}
+
+/// The core flash where the drop landed — brightest at t=0, gone in a third
+/// of a second.
+private struct SplashCore: View {
+    private struct Flash {
+        var scale: CGFloat = 0.3
+        var opacity: Double = 0
+    }
+
+    @State private var play = 0
+
+    var body: some View {
+        Circle()
+            .fill(
+                RadialGradient(
+                    colors: [.white.opacity(0.95), .white.opacity(0)],
+                    center: .center, startRadius: 1, endRadius: 26,
+                ),
+            )
+            .frame(width: 52, height: 52)
+            .keyframeAnimator(initialValue: Flash(), trigger: play) { core, value in
+                core
+                    .scaleEffect(value.scale)
+                    .opacity(value.opacity)
+            } keyframes: { _ in
+                KeyframeTrack(\.scale) {
+                    SpringKeyframe(1.0, duration: 0.3, spring: .bouncy)
+                }
+                KeyframeTrack(\.opacity) {
+                    LinearKeyframe(1.0, duration: 0.05)
+                    LinearKeyframe(0.0, duration: 0.3)
+                }
             }
-        }
-        .onAppear { play += 1 }
-        .allowsHitTesting(false)
+            .onAppear { play += 1 }
     }
 }
 
