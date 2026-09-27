@@ -107,6 +107,16 @@ android/                Kotlin receiver
 src/                    Node reference engine: the protocol definition
 ```
 
+## Sponsors
+
+HyperSend is supported by **BMS**. Their backing keeps the project free, MIT,
+and free of dependencies — and keeps real hardware on the far end of every
+two-lane benchmark in [Numbers](#numbers).
+
+If your organisation would like to sponsor HyperSend, open an issue titled
+"sponsorship" or reach out to [@lakshyaverse](https://github.com/lakshyaverse) —
+or [buy me a coffee](https://buymeacoffee.com/lakshyaverse).
+
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). The short version: the wire protocol
