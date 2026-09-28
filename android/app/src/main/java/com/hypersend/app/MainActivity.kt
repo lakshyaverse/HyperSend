@@ -1863,7 +1863,7 @@ class MainActivity : Activity() {
     }
 
     companion object {
-        const val VERSION = "0.4.0"
+        const val VERSION = "0.4.1"
 
         /** adb reverse tunnel as seen from the phone: 127.0.0.1:44014 → Mac :44012. */
         const val USB_REVERSE_PORT = 44014

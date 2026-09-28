@@ -40,7 +40,7 @@ test("transfers files with byte-exact content and verified hashes", async () => 
     await writeFile(p1, payload);
     await writeFile(p2, payload.subarray(0, 1024));
 
-    const rx = await startReceiver(dest, { streams: 2 });
+    const rx = await startReceiver(dest, { port: 0, streams: 2 });
     const rxDone = rx.done;
     const result = await sendFiles([p1, p2], { label: "loopback", host: "127.0.0.1", port: rx.address.port });
     const received = await rxDone;
@@ -67,7 +67,7 @@ test("resumes a partial file instead of restarting", async () => {
     await mkdir(dest, { recursive: true });
     await wf(join(dest, "resume.bin"), payload.subarray(0, 2 * 1024 * 1024));
 
-    const rx = await startReceiver(dest, { streams: 2 });
+    const rx = await startReceiver(dest, { port: 0, streams: 2 });
     const rxDone = rx.done;
     const result = await sendFiles([p], { label: "loopback", host: "127.0.0.1", port: rx.address.port });
     await rxDone;
@@ -86,7 +86,7 @@ test("skips files the receiver already has (hash match)", async () => {
     const p = join(src, "dup.bin");
     await writeFile(p, payload);
 
-    const rx = await startReceiver(dest, { streams: 1 });
+    const rx = await startReceiver(dest, { port: 0, streams: 1 });
     const first = await sendFiles([p], { label: "loopback", host: "127.0.0.1", port: rx.address.port });
     const receivedFirst = await rx.done;
     rx.stop();
@@ -94,7 +94,7 @@ test("skips files the receiver already has (hash match)", async () => {
     assert.equal(receivedFirst.length, 1);
 
     // Second identical batch: receiver already has it, zero data bytes flow.
-    const rx2 = await startReceiver(dest, { streams: 1 });
+    const rx2 = await startReceiver(dest, { port: 0, streams: 1 });
     const second = await sendFiles([p], { label: "loopback", host: "127.0.0.1", port: rx2.address.port });
     const receivedSecond = await rx2.done;
     rx2.stop();
@@ -108,7 +108,7 @@ test("zero-byte files arrive as zero-byte files", async () => {
   await withDirs(async (src, dest) => {
     const p = join(src, "empty.bin");
     await writeFile(p, Buffer.alloc(0));
-    const rx = await startReceiver(dest, { streams: 1 });
+    const rx = await startReceiver(dest, { port: 0, streams: 1 });
     const rxDone = rx.done;
     const result = await sendFiles([p], { label: "loopback", host: "127.0.0.1", port: rx.address.port });
     await rxDone;
@@ -137,6 +137,7 @@ test("declined offers are reported, not fatal", async () => {
     await writeFile(p2, Buffer.alloc(4096, 2));
 
     const rx = await startReceiver(dest, {
+      port: 0,
       streams: 1,
       confirmOffer: (offer) => offer.path !== "no.bin",
     });
@@ -159,7 +160,7 @@ test("a dead extra lane degrades to a slower send instead of failing", async () 
     const p = join(src, "lanes.bin");
     await writeFile(p, payload);
 
-    const rx = await startReceiver(dest, { streams: 2 });
+    const rx = await startReceiver(dest, { port: 0, streams: 2 });
     const rxDone = rx.done;
     // 127.0.0.1:9 (discard port) refuses every dial: the batch must still
     // complete over the live loopback lane.
@@ -189,7 +190,7 @@ test("progress reports the in-flight file's own bytes, not the batch", async () 
     await writeFile(p2, randomBuf(2 * 1024 * 1024));
 
     const seen: Array<{ name: string; done: number; total: number }> = [];
-    const rx = await startReceiver(dest, { streams: 1 });
+    const rx = await startReceiver(dest, { port: 0, streams: 1 });
     const rxDone = rx.done;
     await sendFiles([p1, p2], { label: "loopback", host: "127.0.0.1", port: rx.address.port }, {
       streams: 1,
@@ -217,7 +218,7 @@ test("receiver exits cleanly after a batch (no dangling listener)", async () => 
   await withDirs(async (src, dest) => {
     const p = join(src, "exit.bin");
     await writeFile(p, randomBuf(1024));
-    const rx = await startReceiver(dest, { streams: 1 });
+    const rx = await startReceiver(dest, { port: 0, streams: 1 });
     const rxDone = rx.done;
     await sendFiles([p], { label: "loopback", host: "127.0.0.1", port: rx.address.port });
     await rxDone;

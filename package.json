@@ -1,6 +1,6 @@
 {
   "name": "hypersend",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": true,
   "description": "HyperSend — a high-performance LAN file transfer engine (macOS <-> Android) built as a coding exercise.",
   "type": "module",
