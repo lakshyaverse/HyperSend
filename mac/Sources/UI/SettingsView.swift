@@ -152,12 +152,22 @@ struct SettingsView: View {
     // MARK: Lanes
 
     @AppStorage(Pref.socketsPerLane) private var socketsPerLane = 2
+    @AppStorage(Pref.usbLaneEnabled) private var usbLaneEnabled = true
 
     private var lanesSection: some View {
         Form {
             Section {
                 LabeledContent("Wi-Fi") {
                     LaneStatus(ready: true, detail: "always available")
+                }
+                LabeledContent("Bond USB lane") {
+                    Picker("Bond USB lane", selection: $usbLaneEnabled) {
+                        Text("When available").tag(true)
+                        Text("Wi-Fi only").tag(false)
+                    }
+                    .pickerStyle(.segmented)
+                    .frame(width: 220)
+                    .labelsHidden()
                 }
                 LabeledContent("USB cable") {
                     LaneStatus(

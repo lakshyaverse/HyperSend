@@ -36,6 +36,12 @@ chunk order and lane provenance do not matter. Adding a lane is adding a
 socket; **losing** a lane is just a slower send — a path that won't open is
 logged and skipped, never fatal.
 
+Lane choice is yours, not the hardware's: Wi-Fi-only is the default shape of
+a send (no cable, no problem), and when the cable is up the app bonds it
+automatically for the combined 68+ MB/s. Want the cable left for charging?
+Flip **Bond USB lane** to *Wi-Fi only* in the inspector or Settings — the USB
+toggle in the Android send sheet does the same from the phone.
+
 ### Trust model
 
 Everything on the wire — beacons, control frames, file bytes — is plaintext,
@@ -116,7 +122,9 @@ earlier systems. Same layout either way.
 ## Linux and Windows
 
 The CLI is the same engine, same protocol, same logic — no port, no fork.
-It needs Node 20 or newer and nothing else:
+It needs Node 20 or newer and nothing else. Every release ships ready-to-run
+artifacts — `hypersend-cli-<version>-linux-x64.tar.gz` and
+`hypersend-cli-<version>-windows-x64.zip` — or build from source:
 
 ```bash
 git clone https://github.com/lakshyaverse/HyperSend.git
@@ -151,6 +159,7 @@ mac/Sources/UI/         the window (SwiftUI, tokens in Tokens.swift)
 mac/Tests/              the end-to-end suite
 android/                Kotlin connector: receiver AND sender, the phone is a peer
 src/                    Node engine: the protocol definition, Linux/Windows CLI
+tools/release.sh        one command: build + tag + publish all four platforms
 ```
 
 ## Sponsors

@@ -1,175 +1,165 @@
-#!/usr/bin/env swift
-//
-// Generates HyperSend's app icon.
-//
-//   swift tools/make-icon.swift              → /tmp/HyperSend.iconset
-//   iconutil -c icns /tmp/HyperSend.iconset -o mac/HyperSend.icns
-//
-// Why a script and not a checked-in PNG: the mark is four lines of geometry, so
-// the icon can be re-rendered at any size, retinted, or regenerated on a machine
-// that has never seen the original artwork. Every size is drawn from scratch
-// rather than downscaled from one master — a 16 pt icon rendered as vectors
-// keeps its stroke weight, where a 1024 pt reduction turns to mush.
-//
-// The mark is the product: two lanes, one carrying up and one carrying down,
-// bonded side by side on graphite. No rocket, no cloud, no folder.
-
 import CoreGraphics
-import Foundation
 import ImageIO
+import Foundation
 import UniformTypeIdentifiers
 
-// MARK: - Palette
+// Draws the HyperSend icon in the app's own visual language:
 //
-// Desaturated on purpose. Saturated arrows on a dark body vibrate at small
-// sizes; these read as light strokes with a tint, not as neon.
+//   - the pastel sky from Scene.skyStops (the window's backdrop),
+//   - a rounded-square glass lens floating on it, lit like the app's panels
+//     (bright specular top edge, fresnel rim, soft ground shadow),
+//   - a Wi-Fi arc and a USB arrow inside the lens — the two lanes —
+//     drawn in the deep-blue glass ink the UI uses,
+//   - a warm bloom and a violet counter-bloom behind the lens so the glass
+//     has light to bend, exactly like the window's Scene.warmStops.
+//
+// Colors are lifted from mac/Sources/UI/Tokens.swift so the icon, the window
+// and the Android app share one palette. Run: swift tools/make-icon.swift
 
-let bodyTop = (r: 44.0, g: 47.0, b: 54.0)
-let bodyBottom = (r: 17.0, g: 19.0, b: 23.0)
-let laneUp = (r: 158.0, g: 194.0, b: 246.0)   // Wi-Fi, matching the UI
-let laneDown = (r: 147.0, g: 216.0, b: 172.0) // USB cable, matching the UI
+let size = 1024
+let s = CGFloat(size)
 
-func srgb(_ c: (r: Double, g: Double, b: Double), _ alpha: Double = 1) -> CGColor {
-    CGColor(srgbRed: c.r / 255, green: c.g / 255, blue: c.b / 255, alpha: alpha)
-}
+let skyTop = CGColor(red: 0.62, green: 0.83, blue: 0.99, alpha: 1)
+let skyBottom = CGColor(red: 0.39, green: 0.58, blue: 0.98, alpha: 1)
+let warm = CGColor(red: 1.00, green: 0.88, blue: 0.60, alpha: 1)
+let violet = CGColor(red: 0.86, green: 0.85, blue: 1.00, alpha: 1)
+// Deep-blue glass ink for lane marks — saturated enough to read at 32 px.
+let ink = CGColor(red: 0.08, green: 0.22, blue: 0.58, alpha: 0.95)
+let inkSoft = CGColor(red: 0.08, green: 0.22, blue: 0.58, alpha: 0.55)
 
-// MARK: - Rendering
+let ctx = CGContext(
+    data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: size * 4,
+    space: CGColorSpace(name: CGColorSpace.sRGB)!,
+    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+)!
 
-func render(size: Int) -> CGImage? {
-    let side = CGFloat(size)
-    guard let space = CGColorSpace(name: CGColorSpace.sRGB),
-          let ctx = CGContext(
-              data: nil,
-              width: size,
-              height: size,
-              bitsPerComponent: 8,
-              bytesPerRow: 0,
-              space: space,
-              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue,
-          )
-    else { return nil }
+// ── sky ──────────────────────────────────────────────────────────────────────
+let sky = CGGradient(colorsSpace: nil, colors: [skyTop, skyBottom] as CFArray, locations: [0, 1])!
+ctx.drawLinearGradient(sky, start: CGPoint(x: s / 2, y: s), end: CGPoint(x: s / 2, y: 0), options: [])
 
-    ctx.setShouldAntialias(true)
-    ctx.interpolationQuality = .high
-
-    // macOS icon grid: the squircle occupies roughly 80% of the canvas, and
-    // everything left over is the margin the Dock and Finder expect.
-    let inset = side * 0.0985
-    let square = CGRect(x: inset, y: inset, width: side - inset * 2, height: side - inset * 2)
-    let radius = square.width * 0.2237
-    let body = CGPath(roundedRect: square, cornerWidth: radius, cornerHeight: radius, transform: nil)
-
-    // ── Body ────────────────────────────────────────────────────────────────
+// ── blooms behind the lens (the light the glass refracts) ───────────────────
+func bloom(_ color: CGColor, _ rect: CGRect) {
+    let g = CGGradient(
+        colorsSpace: nil,
+        colors: [color.copy(alpha: 0.85), color.copy(alpha: 0)] as CFArray,
+        locations: [0, 1]
+    )!
     ctx.saveGState()
-    ctx.addPath(body)
-    ctx.clip()
-
-    if let gradient = CGGradient(
-        colorsSpace: space,
-        colors: [srgb(bodyTop), srgb(bodyBottom)] as CFArray,
-        locations: [0, 1],
-    ) {
-        ctx.drawLinearGradient(
-            gradient,
-            start: CGPoint(x: square.midX, y: square.maxY),
-            end: CGPoint(x: square.midX, y: square.minY),
-            options: [],
-        )
-    }
-
-    // One soft light from above, so the surface is not perfectly even — the
-    // same single-source lighting the window texture uses.
-    if let sheen = CGGradient(
-        colorsSpace: space,
-        colors: [CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.13),
-                 CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0)] as CFArray,
-        locations: [0, 1],
-    ) {
-        ctx.drawLinearGradient(
-            sheen,
-            start: CGPoint(x: square.midX, y: square.maxY),
-            end: CGPoint(x: square.midX, y: square.midY),
-            options: [],
-        )
-    }
-
-    // ── Mark ────────────────────────────────────────────────────────────────
-    let stroke = square.width * 0.072
-    let halfWidth = square.width * 0.098
-
-    func lane(x: CGFloat, up: Bool, tint: CGColor) {
-        let shaftTop = square.minY + square.height * 0.255
-        let shaftBottom = square.minY + square.height * 0.745
-
-        ctx.setLineCap(.round)
-        ctx.setLineJoin(.round)
-        ctx.setLineWidth(stroke)
-        ctx.setStrokeColor(tint)
-
-        // Shaft.
-        ctx.move(to: CGPoint(x: x, y: up ? shaftBottom : shaftTop))
-        ctx.addLine(to: CGPoint(x: x, y: up ? shaftTop : shaftBottom))
-        ctx.strokePath()
-
-        // Head — a chevron, so the stroke weight matches the shaft exactly.
-        let tipY = up ? shaftTop : shaftBottom
-        let baseY = up ? tipY - square.height * 0.155 : tipY + square.height * 0.155
-        ctx.move(to: CGPoint(x: x - halfWidth, y: baseY))
-        ctx.addLine(to: CGPoint(x: x, y: tipY))
-        ctx.addLine(to: CGPoint(x: x + halfWidth, y: baseY))
-        ctx.strokePath()
-    }
-
-    lane(x: square.minX + square.width * 0.355, up: true, tint: srgb(laneUp))
-    lane(x: square.minX + square.width * 0.645, up: false, tint: srgb(laneDown))
-
+    ctx.clip(to: rect)
+    ctx.drawRadialGradient(
+        g,
+        startCenter: CGPoint(x: rect.midX, y: rect.midY), startRadius: 0,
+        endCenter: CGPoint(x: rect.midX, y: rect.midY), endRadius: max(rect.width, rect.height) / 2,
+        options: []
+    )
     ctx.restoreGState()
+}
+bloom(warm, CGRect(x: s * 0.08, y: s * 0.55, width: s * 0.50, height: s * 0.42))
+bloom(violet, CGRect(x: s * 0.50, y: s * 0.10, width: s * 0.42, height: s * 0.38))
 
-    // ── Edge ────────────────────────────────────────────────────────────────
-    // A hairline rim: without it the body melts into a dark Dock.
-    ctx.addPath(body)
-    ctx.setLineWidth(max(1, side * 0.004))
-    ctx.setStrokeColor(CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.14))
+// ── the glass lens ───────────────────────────────────────────────────────────
+let lens = CGRect(x: s * 0.22, y: s * 0.22, width: s * 0.56, height: s * 0.56)
+let radius: CGFloat = s * 0.14
+let path = CGPath(roundedRect: lens, cornerWidth: radius, cornerHeight: radius, transform: nil)
+
+// Ground shadow: the lens floats.
+ctx.saveGState()
+ctx.setShadow(offset: CGSize(width: 0, height: -s * 0.022), blur: s * 0.05,
+              color: CGColor(red: 0.05, green: 0.15, blue: 0.40, alpha: 0.35))
+ctx.addPath(path)
+ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.28))
+ctx.fillPath()
+ctx.restoreGState()
+
+// Glass body: vertical white sheen, brighter at the top like the panels.
+let glass = CGGradient(
+    colorsSpace: nil,
+    colors: [
+        CGColor(red: 1, green: 1, blue: 1, alpha: 0.62),
+        CGColor(red: 1, green: 1, blue: 1, alpha: 0.30),
+        CGColor(red: 0.92, green: 0.96, blue: 1, alpha: 0.42),
+    ] as CFArray,
+    locations: [0, 0.55, 1]
+)!
+ctx.saveGState()
+ctx.addPath(path)
+ctx.clip()
+ctx.drawLinearGradient(glass, start: CGPoint(x: lens.midX, y: lens.maxY),
+                       end: CGPoint(x: lens.midX, y: lens.minY), options: [])
+ctx.restoreGState()
+
+// Fresnel rim: bright specular on the lit edge, fading around.
+ctx.saveGState()
+ctx.addPath(path)
+ctx.setStrokeColor(CGColor(red: 1, green: 1, blue: 1, alpha: 0.95))
+ctx.setLineWidth(s * 0.012)
+ctx.replacePathWithStrokedPath()
+ctx.clip()
+let rim = CGGradient(
+    colorsSpace: nil,
+    colors: [
+        CGColor(red: 1, green: 1, blue: 1, alpha: 1.0),
+        CGColor(red: 1, green: 1, blue: 1, alpha: 0.25),
+        CGColor(red: 1, green: 1, blue: 1, alpha: 0.75),
+    ] as CFArray,
+    locations: [0, 0.5, 1]
+)!
+ctx.drawLinearGradient(rim, start: CGPoint(x: lens.minX, y: lens.maxY),
+                       end: CGPoint(x: lens.maxX, y: lens.minY), options: [])
+ctx.restoreGState()
+
+// ── the two lanes, inside the lens ──────────────────────────────────────────
+let cx = lens.midX
+let cy = lens.midY
+
+// Wi-Fi arcs (three strokes), the radio lane.
+func arc(_ radius: CGFloat, _ width: CGFloat, _ color: CGColor) {
+    ctx.setStrokeColor(color)
+    ctx.setLineWidth(width)
+    ctx.setLineCap(.round)
+    ctx.addArc(center: CGPoint(x: cx, y: cy - s * 0.055), radius: radius,
+               startAngle: .pi * 0.25, endAngle: .pi * 0.75, clockwise: true)
     ctx.strokePath()
-
-    return ctx.makeImage()
 }
+arc(s * 0.075, s * 0.022, inkSoft)
+arc(s * 0.135, s * 0.026, ink.copy(alpha: 0.8)!)
+arc(s * 0.195, s * 0.030, ink)
 
-// MARK: - Emit
+// The dot under the arcs doubles as the USB arrow's tail origin.
+ctx.setFillColor(ink)
+ctx.fillEllipse(in: CGRect(x: cx - s * 0.024, y: cy - s * 0.10, width: s * 0.048, height: s * 0.048))
 
-func write(_ image: CGImage, to path: String) {
-    let url = URL(fileURLWithPath: path)
-    guard let destination = CGImageDestinationCreateWithURL(
-        url as CFURL, UTType.png.identifier as CFString, 1, nil,
-    ) else {
-        FileHandle.standardError.write(Data("cannot write \(path)\n".utf8))
-        exit(1)
-    }
-    CGImageDestinationAddImage(destination, image, nil)
-    guard CGImageDestinationFinalize(destination) else {
-        FileHandle.standardError.write(Data("failed to finalise \(path)\n".utf8))
-        exit(1)
-    }
+// USB lane: an arrow arcing under the Wi-Fi mark, cable to device.
+let usbY = cy + s * 0.155
+let arrow = CGMutablePath()
+arrow.move(to: CGPoint(x: cx - s * 0.135, y: usbY))
+arrow.addCurve(
+    to: CGPoint(x: cx + s * 0.135, y: usbY),
+    control1: CGPoint(x: cx - s * 0.045, y: usbY + s * 0.085),
+    control2: CGPoint(x: cx + s * 0.045, y: usbY + s * 0.085)
+)
+ctx.addPath(arrow)
+ctx.setStrokeColor(ink.copy(alpha: 0.9)!)
+ctx.setLineWidth(s * 0.026)
+ctx.setLineCap(.round)
+ctx.strokePath()
+// Arrowhead.
+ctx.setFillColor(ink)
+let head = CGMutablePath()
+let tipX = cx + s * 0.145, tipY = usbY
+head.move(to: CGPoint(x: tipX + s * 0.020, y: tipY))
+head.addLine(to: CGPoint(x: tipX - s * 0.022, y: tipY + s * 0.040))
+head.addLine(to: CGPoint(x: tipX - s * 0.022, y: tipY - s * 0.040))
+head.closeSubpath()
+ctx.addPath(head)
+ctx.fillPath()
+
+// ── write the master PNG ─────────────────────────────────────────────────────
+let image = ctx.makeImage()!
+let out = URL(fileURLWithPath: "assets/icon.png")
+let dest = CGImageDestinationCreateWithURL(out as CFURL, UTType.png.identifier as CFString, 1, nil)!
+CGImageDestinationAddImage(dest, image, nil)
+guard CGImageDestinationFinalize(dest) else {
+    FileHandle.standardError.write(Data("failed to write \(out.path)\n".utf8)); exit(1)
 }
-
-let outDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "/tmp/HyperSend.iconset"
-try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
-
-// name → pixel size. Both the 1× and 2× slot of every entry iconutil wants.
-let variants: [(String, Int)] = [
-    ("icon_16x16", 16), ("icon_16x16@2x", 32),
-    ("icon_32x32", 32), ("icon_32x32@2x", 64),
-    ("icon_128x128", 128), ("icon_128x128@2x", 256),
-    ("icon_256x256", 256), ("icon_256x256@2x", 512),
-    ("icon_512x512", 512), ("icon_512x512@2x", 1024),
-]
-
-for (name, size) in variants {
-    guard let image = render(size: size) else {
-        FileHandle.standardError.write(Data("render failed at \(size)px\n".utf8))
-        exit(1)
-    }
-    write(image, to: "\(outDir)/\(name).png")
-}
-
-print("wrote \(variants.count) PNGs to \(outDir)")
+print("wrote \(out.path) (\(size)x\(size))")

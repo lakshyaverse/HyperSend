@@ -144,6 +144,21 @@ final class AppModel {
     /// running; revealing it in Finder is enough unless you ask for more.
     var openAfterReceive: Bool = UserDefaults.standard.object(forKey: Pref.openAfterReceive) as? Bool ?? false
 
+    /// Bond the USB cable lane when the tunnel is up, or send Wi-Fi only.
+    /// The value lives in UserDefaults (shared with the Settings window's
+    /// @AppStorage); this computed wrapper keeps both surfaces and the send
+    /// path on one source of truth. The tracked flag exists so flipping the
+    /// toggle redraws the inspector immediately.
+    private var usbLaneEnabledObserved = UserDefaults.standard.object(forKey: Pref.usbLaneEnabled) as? Bool ?? true
+
+    var usbLaneEnabled: Bool {
+        get { UserDefaults.standard.object(forKey: Pref.usbLaneEnabled) as? Bool ?? true }
+        set {
+            usbLaneEnabledObserved = newValue
+            UserDefaults.standard.set(newValue, forKey: Pref.usbLaneEnabled)
+        }
+    }
+
     // Built in start(), not here: the broadcast name must be the *same* string
     // as `deviceName`, otherwise our own beacon no longer matches the self
     // filter below and the app lists this Mac as a nearby device.
@@ -478,7 +493,14 @@ final class AppModel {
         }
 
         var lanes: [Lane] = [Lane(label: "wifi", host: peer.host, port: nil)]
-        if peer.usbReachable, TCPConnection.probe(host: "127.0.0.1", port: Proto.usbLocalPort) {
+        // Lane choice is the user's, not the hardware's: Wi-Fi-only sends work
+        // with or without the cable (a missing tunnel was never fatal), and
+        // this switch makes that choice explicit — some people want the cable
+        // left for charging, or don't trust a tethered link.
+        let usbAllowed = UserDefaults.standard.object(forKey: Pref.usbLaneEnabled) as? Bool ?? true
+        if !usbAllowed {
+            if peer.usbReachable { log("USB lane available but switched off — sending on Wi-Fi only") }
+        } else if peer.usbReachable, TCPConnection.probe(host: "127.0.0.1", port: Proto.usbLocalPort) {
             lanes.append(Lane(label: "usb", host: "127.0.0.1", port: Proto.usbLocalPort))
         } else if peer.usbReachable {
             log("USB tunnel advertised but not answering — sending on Wi-Fi only")

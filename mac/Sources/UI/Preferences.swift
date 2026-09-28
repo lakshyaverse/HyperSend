@@ -17,6 +17,9 @@ enum Pref {
     static let deviceName = "pref.deviceName"
     static let showMenuBarIcon = "pref.showMenuBarIcon"
     static let socketsPerLane = "pref.socketsPerLane"
+    /// On = bond the USB cable lane whenever the tunnel is up (default).
+    /// Off = Wi-Fi only, even with the cable plugged in.
+    static let usbLaneEnabled = "pref.usbLaneEnabled"
 
     /// Registers the defaults the app ships with. Called once at launch, before
     /// anything reads a preference.
@@ -31,6 +34,7 @@ enum Pref {
             revealInFinder: true,
             socketsPerLane: 2,
             showMenuBarIcon: false,
+            usbLaneEnabled: true,
         ])
     }
 }

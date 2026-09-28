@@ -805,10 +805,15 @@ private struct Inspector: View {
                     laneRow("Wi-Fi", ready: true, detail: "always available")
                     laneRow(
                         "USB cable",
-                        ready: model.usbLaneReady,
-                        detail: model.usbLaneReady ? "tunnel open" : "not connected",
+                        ready: model.usbLaneReady && model.usbLaneEnabled,
+                        detail: !model.usbLaneEnabled
+                            ? "switched off — Wi-Fi only"
+                            : model.usbLaneReady ? "tunnel open" : "not connected",
                     )
-                    .modifier(StatusPulse(trigger: model.usbLaneReady))
+                    .modifier(StatusPulse(trigger: model.usbLaneReady && model.usbLaneEnabled))
+                    Toggle("Bond USB lane", isOn: $model.usbLaneEnabled)
+                        .font(UI.Text.caption)
+                        .toggleStyle(.glass)
                 }
 
                 inspectorSection("Receive") {
