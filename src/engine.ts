@@ -16,8 +16,8 @@
 
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { mkdir, open, stat, type FileHandle } from "node:fs/promises";
-import { createServer, connect, type Server, type Socket } from "node:net";
 import { once } from "node:events";
+import { connect, createServer, type Server, type Socket } from "node:net";
 import {
   CHUNK_SIZE,
   ControlChannel,
@@ -101,8 +101,7 @@ function nowMs(): number {
   return Number(process.hrtime.bigint() / 1_000_000n);
 }
 
-/** Chunks allowed in flight per socket (sender) / queued per file (receiver). */
-const INFLIGHT_PER_SOCKET = 4;
+/** Chunks allowed queued for write at once (receiver side). */
 const RECEIVER_MAX_PENDING = 64;
 
 // ── Receiver ─────────────────────────────────────────────────────────────────
@@ -132,9 +131,6 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
   });
 
   const listenPort = opts.port ?? DEFAULT_PORT;
-  const sessionDataSockets = new Set<Socket>();
-  let active: ActiveFile | null = null;
-  let openDataSockets = 0;
   await once(server.listen(listenPort, "0.0.0.0"), "listening");
 
   return {
@@ -165,11 +161,20 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
     drained: Promise<void>;
     markDrained: () => void;
     failed: Error | null;
+    startedAt: number;
   };
 
   async function runSession(controlSock: Socket): Promise<void> {
     tuneSocket(controlSock, "control");
     let dataServer: Server | null = null;
+
+    // Per-session on purpose (previously engine-wide): two simultaneous
+    // senders used to share one `active` file and one socket set, so session
+    // A's chunks fed session B's file and one cleanup() destroyed the other
+    // session's sockets. Session state must die with the session.
+    const sessionDataSockets = new Set<Socket>();
+    let active: ActiveFile | null = null;
+    let openDataSockets = 0;
 
     const cleanup = () => {
       try {
@@ -192,6 +197,15 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
           });
         });
         void channel;
+
+        // A sender that walks away mid-batch must end the session: without
+        // this the session promise never settles, the data listener leaks,
+        // and a fixed --data-port can never be rebound by the next sender.
+        // After a normal batch-done this is a no-op (already resolved).
+        controlSock.once("close", () => {
+          cleanup();
+          rejectSession(new Error("sender closed the control channel"));
+        });
 
         function bumpIdle(): void {
           const wake = active?.idleWakers.shift();
@@ -239,7 +253,8 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
               await waitDrained(f);
               await finishFile(f);
               return;
-            }            case "batch-done":
+            }
+            case "batch-done":
               batchSeen = true;
               resolveSession();
               finished.resolve(received.slice());
@@ -320,12 +335,12 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
               const { rm } = await import("node:fs/promises");
               await rm(absPath, { force: true });
               await writeControl(controlSock, {
-                type: "file-done",
-                transferId: offer.transferId,
-                ok: false,
-                error: "sha256 mismatch — file discarded",
-              });
-              return;
+              type: "file-done",
+              transferId: offer.transferId,
+              ok: false,
+              error: "sha256 mismatch — file discarded (a corrupt resume prefix is the usual cause; the next attempt starts from zero)",
+            });
+            return;
             }
             received.push({ path: absPath, size: offer.size, sha256: hash });
             await writeControl(controlSock, {
@@ -355,6 +370,7 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
             drained: drainedPromise,
             markDrained: drained,
             failed: null,
+            startedAt: Date.now(),
           };
         }
 
@@ -380,12 +396,31 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
                   f.markDrained();
                   return;
                 } else if (openDataSockets === 0 && f.queue.length === 0 && f.pendingWrites === 0) {
-                  // All data sockets closed before the file completed.
-                  f.failed = new Error(
-                    `data streams ended early: ${f.receivedSet.size}/${f.chunkCount} chunks`,
-                  );
-                  f.markDrained();
-                  return;
+                  // All data sockets closed before the file completed — but a
+                  // sender that dials lazily has NO sockets yet when the offer
+                  // lands. Only declare the streams dead once some chunk
+                  // arrived (and the sockets are truly gone) or the grace
+                  // window expired — the same 1.5 s allowance the Swift and
+                  // Kotlin receivers give a sender before giving up.
+                  if (f.receivedSet.size > 0 || Date.now() - f.startedAt > 1_500) {
+                    f.failed = new Error(
+                      `data streams ended early: ${f.receivedSet.size}/${f.chunkCount} chunks`,
+                    );
+                    f.markDrained();
+                    return;
+                  }
+                  // Lazy-dial window: re-check shortly, or as soon as a chunk
+                  // or socket event wakes us.
+                  await new Promise<void>((res) => {
+                    const wake = () => {
+                      clearTimeout(timer);
+                      const i = f.idleWakers.indexOf(wake);
+                      if (i !== -1) f.idleWakers.splice(i, 1);
+                      res();
+                    };
+                    const timer = setTimeout(wake, 200);
+                    f.idleWakers.push(wake);
+                  });
                 } else {
                   await new Promise<void>((res) => f.idleWakers.push(res));
                 }
@@ -412,11 +447,11 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
           if (hash !== f.totalSha) {
             await rm(f.absPath, { force: true });
             await writeControl(controlSock, {
-              type: "file-done",
-              transferId: f.transferId,
-              ok: false,
-              error: "sha256 mismatch — file discarded",
-            });
+            type: "file-done",
+            transferId: f.transferId,
+            ok: false,
+            error: "sha256 mismatch — file discarded (a corrupt resume prefix is the usual cause; the next attempt starts from zero)",
+          });
           } else {
             received.push({ path: f.absPath, size: f.totalSize, sha256: hash });
             await writeControl(controlSock, {
@@ -513,6 +548,8 @@ export function toRelPath(absPath: string, baseDir?: string): string {
 
 export type SendResult = {
   files: number;
+  /** Offers the receiver declined; reported, not fatal. */
+  skipped: number;
   bytes: number;
   elapsedMs: number;
   mibsPerSec: number;
@@ -568,42 +605,87 @@ export async function sendFiles(
   await writeControl(control, hello);
 
   const ready = await new Promise<ReadyMessage>((res, rej) => {
-    const timer = setTimeout(() => rej(new Error("receiver did not answer hello (timeout)")), 15_000);
+    // Self-removing waiter: unlike the old closure dropped into wakeWaiters
+    // and abandoned on timeout, this one always cleans up after itself —
+    // notify() splices the array before firing, so a fired waiter's removal
+    // below is a harmless no-op.
     const check = () => {
-      if (readyMsg) {
-        clearTimeout(timer);
-        res(readyMsg);
-        return true;
-      }
-      return false;
+      if (!readyMsg) return false;
+      const i = wakeWaiters.indexOf(check);
+      if (i !== -1) wakeWaiters.splice(i, 1);
+      clearTimeout(timer);
+      res(readyMsg);
+      return true;
     };
-    if (!check()) wakeWaiters.push(() => check());
+    const timer = setTimeout(() => {
+      const i = wakeWaiters.indexOf(check);
+      if (i !== -1) wakeWaiters.splice(i, 1);
+      rej(new Error("receiver did not answer hello (timeout)"));
+    }, 15_000);
+    if (!check()) wakeWaiters.push(check);
   });
 
   const dataPort = ready.dataPort;
   if (typeof dataPort !== "number") throw new Error("receiver did not advertise a data port");
 
   // One socket pool per path; every socket carries chunks independently.
-  type PathCtx = { label: string; sockets: Socket[]; bytes: number; chunks: number };
-  const pathCtxs: PathCtx[] = [];    for (const t of targetList) {
-    const ctx: PathCtx = { label: t.label, sockets: [], bytes: 0, chunks: 0 };
+  type PathCtx = { label: string; host: string; dataPort: number; sockets: Socket[]; bytes: number; chunks: number };
+  const pathCtxs: PathCtx[] = targetList.map((t) => ({
+    label: t.label,
+    host: t.host,
+    dataPort: t.dataPort ?? dataPort,
+    sockets: [],
+    bytes: 0,
+    chunks: 0,
+  }));
+
+  /** One awaited dial (3 s budget, like the Swift sender). */
+  const dial = (ctx: PathCtx): Promise<Socket> =>
+    new Promise((res, rej) => {
+      const s = connect(connectOpts(ctx.host, ctx.dataPort));
+      tuneSocket(s, `data:${ctx.label}`);
+      const timer = setTimeout(() => finish(new Error("connect timed out")), 3_000);
+      const finish = (err?: Error) => {
+        clearTimeout(timer);
+        s.off("connect", onConnect);
+        s.off("error", onError);
+        if (err) {
+          s.destroy();
+          rej(err);
+        } else {
+          ctx.sockets.push(s);
+          s.once("close", () => {
+            const i = ctx.sockets.indexOf(s);
+            if (i !== -1) ctx.sockets.splice(i, 1);
+          });
+          res(s);
+        }
+      };
+      const onConnect = () => finish();
+      const onError = (err: Error) => finish(err);
+      s.once("connect", onConnect);
+      s.once("error", onError);
+    });
+
+  // Open every lane up front, but a lane that will not open must not kill the
+  // transfer: losing the cable should just mean a slower send. This is the
+  // same contract the Swift and Kotlin senders already honour (per-socket
+  // catch, 3 s dial budget); the Node engine used to abort the whole batch
+  // the moment one path refused a connection.
+  for (const ctx of pathCtxs) {
     for (let i = 0; i < streams; i++) {
-      // Usually data goes to the receiver's advertised dataPort; a target may
-      // override it when the path is a tunnel with its own fixed port.
-      const s = connect(connectOpts(t.host, t.dataPort ?? dataPort));
-      tuneSocket(s, `data:${t.label}`);
-      await once(s, "connect");
-      ctx.sockets.push(s);
-      s.once("close", () => {
-        const i = ctx.sockets.indexOf(s);
-        if (i !== -1) ctx.sockets.splice(i, 1);
-      });
-      s.on("error", () => {
-        /* close follows */
-      });
+      try {
+        await dial(ctx);
+      } catch (err) {
+        console.error(
+          `[hypersend] lane ${ctx.label} on :${ctx.dataPort} unavailable — ${err instanceof Error ? err.message : err}`,
+        );
+        break;
+      }
     }
-    if (ctx.sockets.length > 0) pathCtxs.push(ctx);
-    else throw new Error(`path ${t.label} produced no sockets`);
+  }
+  if (pathCtxs.every((c) => c.sockets.length === 0)) {
+    throw new Error("no data lanes could be opened");
   }
 
   // Prefetch window: hash file N+k while file N streams.
@@ -619,10 +701,18 @@ export async function sendFiles(
   for (let i = 0; i < hashConcurrency; i++) startHash(i);
 
   let filesDone = 0;
+  let skipped = 0;
   let bytesDone = 0;
   let lastTick = nowMs();
   let lastBytes = 0;
   const totalBytes = jobs.reduce((acc, j) => acc + j.size, 0);
+  // Per-file progress accounting: bytesDone is batch-cumulative, so the
+  // callback subtracts everything already finished to report THIS file's own
+  // progress (the old code reported cumulative bytes with per-file
+  // fileIndex/fileName, which reads as nonsense for every file after the
+  // first).
+  let bytesDoneBeforeFile = 0;
+  let currentJobSize = 0;
 
   for (let idx = 0; idx < jobs.length; idx++) {
     const job = jobs[idx]!;
@@ -644,21 +734,26 @@ export async function sendFiles(
       15_000,
     )) as OfferResponseMessage;
     if (!resp.accept) {
+      // Decline is a decision, not a failure: log it, keep the batch moving.
+      // (The Swift sender used to abort the whole batch here; it now skips
+      // too, so all three implementations agree on this semantic.)
       console.error(`[hypersend] receiver declined ${job.relPath}: ${resp.reason ?? "no reason"}`);
+      skipped++;
+      bytesDoneBeforeFile = bytesDone;
       continue;
     }
     const startOffset = Math.max(0, Math.min(resp.offset ?? 0, job.size));
 
-    let sentOk = true;
     if (job.size > startOffset) {
-      sentOk = await pumpChunks(job, startOffset, pathCtxs, () => {
+      bytesDoneBeforeFile = bytesDone;
+      currentJobSize = job.size;
+      await pumpChunks(job, startOffset, pathCtxs, () => {
         const msg: FileSentMessage = { type: "file-sent", transferId };
         return writeControl(control, msg);
       });
-      if (!sentOk) {
-        // Receiver already reported failure via file-done; wait for it below.
-      }
     } else {
+      bytesDoneBeforeFile = bytesDone;
+      currentJobSize = job.size;
       await writeControl(control, { type: "file-sent", transferId } as FileSentMessage);
     }
 
@@ -688,6 +783,7 @@ export async function sendFiles(
 
   return {
     files: filesDone,
+    skipped,
     bytes: bytesDone,
     elapsedMs,
     mibsPerSec: elapsedMs > 0 ? bytesDone / (1024 * 1024) / (elapsedMs / 1000) : 0,
@@ -697,17 +793,17 @@ export async function sendFiles(
   /**
    * Self-balancing chunk scheduler: N workers over the shared offset queue.
    * Fast sockets pull more chunks; a stalled socket just stops being fed.
-   * Returns true when every scheduled chunk was handed to a socket write.
+   * Every worker owns one socket exclusively — two workers sharing a socket
+   * would interleave header+payload writes and corrupt the framing.
    */
   async function pumpChunks(
     job: { absPath: string; relPath: string; size: number },
     startOffset: number,
     paths: PathCtx[],
     onAllQueued: () => Promise<void>,
-  ): Promise<boolean> {
+  ): Promise<void> {
     let nextOffset = startOffset;
     const allWorkers: Array<Promise<void>> = [];
-    let aborted = false;
     // One shared handle for positional reads: no per-chunk stream setup cost
     // (150+ createReadStream calls per 300 MB otherwise) and safe for
     // concurrent readers because reads are position-based.
@@ -715,7 +811,7 @@ export async function sendFiles(
     const fh = await open(job.absPath, "r");
 
     const worker = async (ctx: PathCtx, sock: Socket): Promise<void> => {
-      while (!aborted) {
+      for (;;) {
         const offset = nextOffset;
         if (offset >= job.size) return;
         nextOffset = offset + CHUNK_SIZE;
@@ -730,25 +826,20 @@ export async function sendFiles(
     };
 
     for (const ctx of paths) {
-      for (const s of ctx.sockets) {
-        allWorkers.push(
-          worker(ctx, s).catch((err) => {
-            aborted = true;
-            throw err;
-          }),
-        );
+      for (const s of [...ctx.sockets]) {
+        allWorkers.push(worker(ctx, s));
       }
     }
     try {
       await Promise.all(allWorkers);
-    } catch (err) {
-      aborted = true;
-      throw err;
     } finally {
       await fh.close().catch(() => {});
     }
     await onAllQueued();
-    return !aborted;
+    // Boundary tick, unthrottled: a file faster than the 250 ms progress
+    // window (anything small over loopback) otherwise reports nothing at all
+    // — the same force-emit the Swift sender does at end of file.
+    maybeProgress(job.relPath, paths, true);
   }
 
   /** Positional read of exactly `len` bytes (short reads are retried). */
@@ -763,15 +854,15 @@ export async function sendFiles(
     return buf;
   }
 
-  function maybeProgress(fileName: string, paths: PathCtx[]): void {
+  function maybeProgress(fileName: string, paths: PathCtx[], force = false): void {
     const t = nowMs();
-    if (t - lastTick >= 250 && opts.onProgress) {
+    if ((force || t - lastTick >= 250) && opts.onProgress) {
       opts.onProgress({
         fileIndex: filesDone,
         totalFiles: jobs.length,
         fileName,
-        bytesDone,
-        bytesTotal: totalBytes,
+        bytesDone: bytesDone - bytesDoneBeforeFile,
+        bytesTotal: currentJobSize,
         mibsPerSec: (bytesDone - lastBytes) / (1024 * 1024) / ((t - lastTick) / 1000),
         perPath: paths.map((p) => ({ label: p.label, bytes: p.bytes, chunks: p.chunks })),
       });

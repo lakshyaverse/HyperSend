@@ -111,11 +111,27 @@ export async function discoverPeer(timeoutMs = 5_000, wantName?: string): Promis
   });
 
   try {
+    // A failed bind surfaces as an 'error' EVENT, not a throw, so diagnosing
+    // it in a catch block — as this code once pretended to — never ran. The
+    // port being taken almost always means a receiver is beaconing RIGHT
+    // HERE and its loopback copy (127.0.0.1) is the peer we want; say that.
+    const onBindError = (err: Error): void => {
+      console.error(
+        `[hypersend] could not bind UDP ${DISCOVERY_PORT} (${err.message}) — ` +
+          `a receiver running on this machine still resolves via its loopback beacons; otherwise pass --to <ip>`,
+      );
+    };
+    sock.once("error", onBindError);
     sock.bind(DISCOVERY_PORT);
-    await once(sock, "listening").catch(() => {});
+    // Never let a socket that failed to open hang discovery: race the
+    // listening event against a short budget and move on either way.
+    await Promise.race([
+      once(sock, "listening").catch(() => {}),
+      new Promise((res) => setTimeout(res, 1_000)),
+    ]);
+    sock.off("error", onBindError);
   } catch {
-    // Some other process owns the port (e.g. a second receiver); discovery
-    // still works without binding — we just can't hear beacons. Fall through.
+    // Synchronous bind failure (invalid args); the error event covers the rest.
   }
 
   const deadline = Date.now() + timeoutMs;

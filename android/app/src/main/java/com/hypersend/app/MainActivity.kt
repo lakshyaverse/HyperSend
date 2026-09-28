@@ -1703,7 +1703,11 @@ class MainActivity : Activity() {
         ball.set(BallView.Mode.DONE, 1f)
         ball.pop()
         heroTitle.text = "Sent ${summary.files} file(s)"
-        heroCaption.text = "Every byte verified with SHA-256 on arrival."
+        heroCaption.text = if (summary.declined > 0) {
+            "Every byte verified with SHA-256 on arrival · ${summary.declined} declined by the receiver."
+        } else {
+            "Every byte verified with SHA-256 on arrival."
+        }
         heroMeta.text = String.format(
             Locale.US, "%s in %.1fs · %.1f MB/s",
             Protocol.humanBytes(summary.bytes), summary.seconds, mbps,

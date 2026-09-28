@@ -13,11 +13,6 @@ import type { Socket } from "node:net";
 /** 8 MiB — far above any plausible LAN BDP; OS clamps down to its own max. */
 export const SOCKET_BUFFER_BYTES = 8 * 1024 * 1024;
 
-/** Hot-path chunk size. Large enough to amortise syscalls, small enough to
- *  keep GC pressure and head-of-line blocking low. 1 MiB is the sweet spot for
- *  stream.Readable pipelines on modern Node. */
-export const CHUNK_SIZE = 1024 * 1024;
-
 export function tuneSocket(socket: Socket, label: string): void {
   socket.setNoDelay(true);
   socket.setKeepAlive(true, 5_000);

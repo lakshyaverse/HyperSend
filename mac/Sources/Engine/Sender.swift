@@ -41,6 +41,10 @@ struct SendProgress {
 
 struct SendSummary {
     let files: Int
+    /// Offers the receiver said no to; a decision, not a failure.
+    let declined: Int
+    /// The display paths that were declined, so the UI can mark those rows.
+    let declinedPaths: [String]
     let bytes: Int64
     let seconds: Double
     let lanes: [String: LaneReport]
@@ -157,6 +161,8 @@ final class SendEngine {
 
         // ── per-file transfer ─────────────────────────────────────────────
         var filesDone = 0
+        var declinedFiles = 0
+        var declinedPaths: [String] = []
 
         for (index, file) in files.enumerated() {
             if isCancelled { break }
@@ -173,37 +179,57 @@ final class SendEngine {
                 "sha256": digest,
             ])
 
-            let offset = try awaitOfferResponse(control, transferId: transferId, size: size)
-            if offset > 0 { log?("resuming \(displayName) at \(formattedBytes(offset))") }
+            // A decline is a decision, not a failure: skip the file and keep
+            // the batch alive — the same semantic the Node engine and the
+            // Android sender already honour. Declining ONE file used to
+            // throw out of this loop and mark every remaining transfer failed.
+            do {
+                let accepted = try awaitOfferResponse(control, transferId: transferId, size: size)
+                if let offset = accepted {
+                    if offset > 0 { log?("resuming \(displayName) at \(formattedBytes(offset))") }
 
-            if size > offset && !isCancelled {
-                try pumpChunks(
-                    file: file,
-                    displayName: displayName,
-                    from: offset,
-                    size: size,
-                    sockets: sockets,
-                    fileIndex: index + 1,
-                    fileCount: files.count,
-                    bytesTotal: totalBytes,
-                    progress: progress,
-                )
+                    if size > offset && !isCancelled {
+                        try pumpChunks(
+                            file: file,
+                            displayName: displayName,
+                            from: offset,
+                            size: size,
+                            sockets: sockets,
+                            fileIndex: index + 1,
+                            fileCount: files.count,
+                            bytesTotal: totalBytes,
+                            progress: progress,
+                        )
+                    }
+
+                    try control.writeJSON(["type": "file-sent", "transferId": transferId])
+                    try awaitFileDone(control, transferId: transferId)
+
+                    filesDone += 1
+                    log?("verified \(displayName) · sha256 ok")
+                    emit(
+                        fileName: displayName,
+                        fileIndex: index + 1,
+                        fileCount: files.count,
+                        bytesTotal: totalBytes,
+                        started: started,
+                        progress: progress,
+                        force: true,
+                    )
+                } else {
+                    log?("declined \(displayName) — skipping")
+                    declinedFiles += 1
+                    declinedPaths.append(displayName)
+                }
+            } catch let error as HyperSendError {
+                if case .rejected = error {
+                    log?("declined \(displayName) — skipping (\(error.localizedDescription))")
+                    declinedFiles += 1
+                    declinedPaths.append(displayName)
+                    continue
+                }
+                throw error
             }
-
-            try control.writeJSON(["type": "file-sent", "transferId": transferId])
-            try awaitFileDone(control, transferId: transferId)
-
-            filesDone += 1
-            log?("verified \(displayName) · sha256 ok")
-            emit(
-                fileName: displayName,
-                fileIndex: index + 1,
-                fileCount: files.count,
-                bytesTotal: totalBytes,
-                started: started,
-                progress: progress,
-                force: true,
-            )
         }
 
         let seconds = Date().timeIntervalSince(started)
@@ -214,7 +240,14 @@ final class SendEngine {
             "elapsedMs": Int(seconds * 1000),
         ])
 
-        return SendSummary(files: filesDone, bytes: transmitted, seconds: seconds, lanes: snapshot(seconds: seconds))
+        return SendSummary(
+            files: filesDone,
+            declined: declinedFiles,
+            declinedPaths: declinedPaths,
+            bytes: transmitted,
+            seconds: seconds,
+            lanes: snapshot(seconds: seconds),
+        )
     }
 
     // MARK: - Control handshakes
@@ -241,7 +274,7 @@ final class SendEngine {
         }
     }
 
-    private func awaitOfferResponse(_ control: TCPConnection, transferId: String, size: Int64) throws -> Int64 {
+    private func awaitOfferResponse(_ control: TCPConnection, transferId: String, size: Int64) throws -> Int64? {
         // Generous on purpose: a receiver with automatic acceptance turned off
         // puts this offer in front of a *person*, and the answer takes as long
         // as a person takes. Mirrored by AppModel.acceptPromptTimeout.
@@ -256,7 +289,8 @@ final class SendEngine {
             switch msg["type"] as? String {
             case "offer-response":
                 if (msg["accept"] as? Bool) != true {
-                    throw HyperSendError.rejected((msg["reason"] as? String) ?? "declined by receiver")
+                    // nil = declined: the caller decides (skip vs abort).
+                    return nil
                 }
                 return min(max(Int64((msg["offset"] as? Int) ?? 0), 0), size)
             case "error":

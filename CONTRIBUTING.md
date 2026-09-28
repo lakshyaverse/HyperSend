@@ -20,7 +20,7 @@ The Mac app:
 git clone https://github.com/lakshyaverse/HyperSend.git
 cd HyperSend/mac
 ./build.sh run     # xcodebuild, then launch
-./test.sh          # 42 end-to-end checks, ~seconds, no phone needed
+./test.sh          # end-to-end checks, ~seconds, no phone needed
 ```
 
 There is a real Xcode project (`HyperSend.xcodeproj`) if you want Xcode's
@@ -37,7 +37,7 @@ there, it is red.
 
 ## Before you open a PR
 
-- `mac/test.sh` passes (all 42) and `npm test` passes (all 6).
+- `mac/test.sh` passes (full suite) and `npm test` passes.
 - The Android receiver still round-trips against the Mac sender if you touched
   anything protocol-side.
 - No new dependencies. The zero-dependency property is a feature.

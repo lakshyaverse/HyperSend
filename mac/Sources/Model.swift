@@ -414,7 +414,10 @@ final class AppModel {
     }
 
     private func expirePeers() {
-        let cutoff = Date().addingTimeInterval(-8)
+        // 6 s — the SAME staleness window BeaconListener.expire uses. The table
+        // used to expire on two different clocks (8 s here, 6 s there), which
+        // made rows flicker back and forth at the boundary.
+        let cutoff = Date().addingTimeInterval(-6)
         let before = peers.count
         // Keep adb-detected peers even if they never broadcast.
         peers = peers.filter { $0.lastSeen > cutoff || $0.usbReachable }
@@ -517,9 +520,12 @@ final class AppModel {
                     socketsPerLane: socketsPerLane,
                     progress: { progress in
                         // The engine reports a cumulative byte count across the
-                        // whole batch, so subtract everything already finished
-                        // to get this file's own progress bar.
-                        guard let index = items.firstIndex(where: { $0.name == progress.fileName }) else { return }
+                        // whole batch plus a 1-based fileIndex; row lookup goes by
+                        // that index. Matching by NAME used to funnel every tick
+                        // into the FIRST row with that name, so a batch with two
+                        // same-named files never moved the second card.
+                        let index = progress.fileIndex - 1
+                        guard items.indices.contains(index) else { return }
                         let target = items[index]
                         let alreadyDone = items[..<index].reduce(Int64(0)) { $0 + $1.size }
                         let lanesSnapshot = progress.lanes
@@ -535,13 +541,26 @@ final class AppModel {
                 )
 
                 DispatchQueue.main.async {
-                    for item in items where !item.status.isTerminal {
-                        item.status = .done
-                        item.finish(bytesDone: item.size, lanes: summary.lanes, seconds: summary.seconds)
+                    // Declined rows are a decision, not a success: they get
+                    // their own status instead of riding the "all done" sweep.
+                    let declinedSet = Set(summary.declinedPaths)
+                    var sent = 0
+                    for item in items {
+                        if declinedSet.contains(item.name) {
+                            item.status = .failed("declined by receiver")
+                        } else if !item.status.isTerminal {
+                            item.status = .done
+                            item.finish(bytesDone: item.size, lanes: summary.lanes, seconds: summary.seconds)
+                            sent += 1
+                        } else if item.status == .done {
+                            sent += 1
+                        }
                     }
-                    self.sentCount += items.count
+                    self.sentCount += sent
                     self.isSending = false
-                    self.statusText = "Sent \(items.count) file\(items.count == 1 ? "" : "s") · \(formattedRate(summary.bytesPerSec))"
+                    self.statusText = declinedSet.isEmpty
+                        ? "Sent \(sent) file\(sent == 1 ? "" : "s") · \(formattedRate(summary.bytesPerSec))"
+                        : "Sent \(sent), declined \(declinedSet.count)"
                     self.log(String(
                         format: "done · %@ in %@ · %@",
                         formattedBytes(summary.bytes),

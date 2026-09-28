@@ -103,6 +103,40 @@ export type ControlMessage =
 
 // ── Framing ──────────────────────────────────────────────────────────────────
 
+/**
+ * Wait until the socket drains, or fail fast if the peer goes away first.
+ *
+ * A plain `once(socket, "drain")` hangs forever when the peer vanishes
+ * without an RST: Node emits "close" (or nothing at all until keepalive
+ * gives up minutes later), never "error" — a Wi-Fi drop or a phone falling
+ * asleep would wedge the writer on that await for good. Racing drain against
+ * close/end/error turns the silent wedge into an ordinary socket error that
+ * the lane-loss handling in the sender can retire.
+ */
+async function drainedOrClosed(socket: Socket): Promise<void> {
+  if (socket.writableLength === 0) return;
+  if (socket.destroyed || socket.writableEnded) {
+    throw new Error("socket closed before drain — peer went away");
+  }
+  await new Promise<void>((resolve, reject) => {
+    const done = (err?: Error) => {
+      socket.off("drain", onDrain);
+      socket.off("close", onClose);
+      socket.off("end", onClose);
+      socket.off("error", onError);
+      if (err) reject(err);
+      else resolve();
+    };
+    const onDrain = () => done();
+    const onClose = () => done(new Error("socket closed before drain — peer went away"));
+    const onError = (err: Error) => done(err);
+    socket.once("drain", onDrain);
+    socket.once("close", onClose);
+    socket.once("end", onClose);
+    socket.once("error", onError);
+  });
+}
+
 /** Write one length-prefixed JSON message. Awaits drain to bound memory. */
 export async function writeControl(socket: Socket, msg: ControlMessage): Promise<void> {
   const payload = Buffer.from(JSON.stringify(msg), "utf8");
@@ -113,7 +147,7 @@ export async function writeControl(socket: Socket, msg: ControlMessage): Promise
   frame.writeUInt32BE(payload.length, 0);
   payload.copy(frame, LENGTH_PREFIX_BYTES);
   if (!socket.write(frame)) {
-    await onceEvent(socket, "drain");
+    await drainedOrClosed(socket);
   }
 }
 
@@ -162,7 +196,7 @@ export async function writeChunk(
   header.writeBigUInt64BE(BigInt(fileOffset), 5);
   socket.write(header);
   if (!socket.write(payload)) {
-    await onceEvent(socket, "drain");
+    await drainedOrClosed(socket);
   }
 }
 

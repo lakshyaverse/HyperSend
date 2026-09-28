@@ -20,15 +20,23 @@ MOUNT="/Volumes/$VOL"
 [[ -d "$APP" ]] || { echo "missing $APP — run ./build.sh first" >&2; exit 1; }
 [[ -f "$BG" ]] || { echo "missing $BG — run: xcrun swift ../tools/make-dmg-bg.swift mac/dmg-bg.png" >&2; exit 1; }
 
-# The window is 1280x800 pt; on a retina Mac the PNG would render at 2x and
-# icons would sit off the shelf. Ship the image at exactly window size.
-sips -z 800 1280 "$BG" --out "$BG" >/dev/null
-
 STAGING=$(mktemp -d)
 trap 'hdiutil detach -quiet "$MOUNT" 2>/dev/null || true; rm -rf "$STAGING"' EXIT
 
+# The window is 1280x800 pt; on a retina Mac the PNG would render at 2x and
+# icons would sit off the shelf. Size it into the staging copy, never in
+# place: writing back to the checked-in asset dirtied the repo on every run.
+BG_SIZED="$STAGING/bg.png"
+sips -z 800 1280 "$BG" --out "$BG_SIZED" >/dev/null
+BG="$BG_SIZED"
+
+# Size the image from the app being shipped; the hardcoded 64 MB failed once
+# the app outgrew it.
+APP_SIZE_MB=$(du -sm "$APP" | cut -f1)
+DMG_SIZE_MB=$((APP_SIZE_MB + 32))
+
 echo "staging…"
-hdiutil create -quiet -volname "$VOL" -size 64m -fs APFS -ov "$STAGING/$VOL.dmg"
+hdiutil create -quiet -volname "$VOL" -size "${DMG_SIZE_MB}m" -fs APFS -ov "$STAGING/$VOL.dmg"
 hdiutil attach -quiet -mountpoint "$MOUNT" "$STAGING/$VOL.dmg"
 
 cp -R "$APP" "$MOUNT/"

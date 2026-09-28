@@ -152,8 +152,6 @@ func runEngineTests() -> Never {
     check(FileManager.default.fileExists(atPath: emptyTarget.path), "empty file exists on the receiving side")
     check((try? sha256File(emptyTarget)) == (try? sha256File(empty)), "empty file hash-matches")
 
-    // ── 5. Path traversal ────────────────────────────────────────────────────
-
     // ── 5. Batch send ────────────────────────────────────────────────────────
 
     // Several files in ONE session: the sender opens its data sockets once and
@@ -235,6 +233,33 @@ func runEngineTests() -> Never {
 
     let folderAgain = send(collected.map(\.url), paths: collected.map(\.relativePath))
     check(folderAgain?.bytes == 0, "re-sending the folder moves zero bytes")
+
+    section("9. same-name files cannot overwrite each other on the wire")
+    // Two loose files with the SAME lastPathComponent used to stage the same
+    // relative path — the receiver would write both into one destination,
+    // the second silently clobbering the first.
+    let dupDirA = scratch.appendingPathComponent("dupA")
+    let dupDirB = scratch.appendingPathComponent("dupB")
+    try! FileManager.default.createDirectory(at: dupDirA, withIntermediateDirectories: true)
+    try! FileManager.default.createDirectory(at: dupDirB, withIntermediateDirectories: true)
+    try! Data([0xAA, 0xBB, 0xCC]).write(to: dupDirA.appendingPathComponent("report.txt"))
+    try! Data([0x11, 0x22, 0x33]).write(to: dupDirB.appendingPathComponent("report.txt"))
+    let dups = (try? collectSendSources(from: [
+        dupDirA.appendingPathComponent("report.txt"),
+        dupDirB.appendingPathComponent("report.txt"),
+    ])) ?? []
+    check(dups.count == 2, "both same-named files staged")
+    check(Set(dups.map(\.relativePath)).count == 2, "same-name files get distinct wire paths")
+    let dupSummary = send(dups.map(\.url), paths: dups.map(\.relativePath))
+    check(dupSummary != nil, "same-name batch completed")
+    check(dupSummary?.bytes == 6, "same-name batch moved exactly both files' bytes (3 + 3)")
+    for source in dups {
+        let landed = receiveDir.appendingPathComponent(source.relativePath)
+        check(
+            (try? sha256File(landed)) == (try? sha256File(source.url)),
+            "\(source.relativePath) landed byte-identical",
+        )
+    }
 
     // ── Result ───────────────────────────────────────────────────────────────
 

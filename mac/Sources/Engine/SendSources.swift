@@ -94,6 +94,41 @@ func collectSendSources(from urls: [URL]) throws -> [SendSource] {
     guard !out.isEmpty else { throw SourceError.nothingToSend }
     guard out.count <= maxBatchFiles else { throw SourceError.tooManyFiles(out.count) }
 
+    // Two files with the same relative path would land in ONE destination on
+    // the receiver — the second silently overwriting or resuming over the
+    // first. Disambiguate deterministically, Finder-style: "name (2).ext".
+    var seen = Set<String>()
+    for index in out.indices {
+        var candidate = out[index].relativePath
+        if seen.contains(candidate) {
+            let directory: String
+            let fileName: String
+            if let slash = candidate.lastIndex(of: "/") {
+                directory = String(candidate[..<slash])
+                fileName = String(candidate[candidate.index(after: slash)...])
+            } else {
+                directory = ""
+                fileName = candidate
+            }
+            let ext: String
+            let stem: String
+            if let dot = fileName.lastIndex(of: "."), dot != fileName.startIndex {
+                stem = String(fileName[..<dot])
+                ext = String(fileName[dot...])
+            } else {
+                stem = fileName
+                ext = ""
+            }
+            var n = 2
+            repeat {
+                candidate = directory.isEmpty ? "\(stem) (\(n))\(ext)" : "\(directory)/\(stem) (\(n))\(ext)"
+                n += 1
+            } while seen.contains(candidate)
+            out[index] = SendSource(url: out[index].url, relativePath: candidate, size: out[index].size)
+        }
+        seen.insert(candidate)
+    }
+
     return out.sorted { $0.relativePath < $1.relativePath }
 }
 

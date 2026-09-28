@@ -33,7 +33,19 @@ A file is a list of 2 MiB chunks. The sender holds one offset queue with a
 worker per data socket — whichever lane finishes its chunk first asks for the
 next one. The receiver writes every chunk at its absolute file offset, so
 chunk order and lane provenance do not matter. Adding a lane is adding a
-socket.
+socket; **losing** a lane is just a slower send — a path that won't open is
+logged and skipped, never fatal.
+
+### Trust model
+
+Everything on the wire — beacons, control frames, file bytes — is plaintext,
+by design: on a LAN you already trust the network you joined. That also means
+there is **no authentication**: any host on the same network can impersonate a
+receiver, inject beacons, or push files to a receiver that accepts
+automatically. If that is not acceptable on your network, turn automatic
+acceptance off (the Mac asks per file; decline anything you didn't ask for),
+or don't run HyperSend on untrusted networks. There is no cloud and nothing
+ever leaves the LAN — but the LAN itself is the security boundary.
 
 The USB lane shouldn't work, and works anyway: phone tethering speaks RNDIS,
 which macOS has no driver for, so the cable never appears as a network
@@ -62,12 +74,14 @@ paths is the only real win available, and it is the whole app.
 
 ## What's tested
 
-`mac/test.sh` runs 42 end-to-end checks over real loopback TCP, no mocks. The
-Node engine carries its own suite (`npm test`, 6 checks) and CI runs it on
+`mac/test.sh` runs the end-to-end suite over real loopback TCP, no mocks (the
+count is printed by the run itself — it grows as behavior gets pinned). The
+Node engine carries its own suite (`npm test`) and CI runs it on
 Ubuntu, Windows and macOS on every push.
 multipath splitting, SHA-256 verification, resume (a matching file moves zero
 bytes, a prefix moves only the rest), out-of-order interleaved chunks, batch
-sends, back-to-back sessions, and rejection of path traversal.
+sends, back-to-back sessions, lane-loss degradation, same-name collisions, and
+rejection of path traversal.
 
 ## Build
 
@@ -79,7 +93,7 @@ same project with `xcodebuild`:
 cd mac
 ./build.sh run      # build and launch
 ./build.sh dmg      # build, then package HyperSend.dmg
-./test.sh           # 42/42 checks
+./test.sh           # the full end-to-end suite
 ```
 
 The app is built with the hardened runtime and ad-hoc signed. Distributed as a
@@ -134,7 +148,7 @@ a driver is missing anyway, the tunnel works exactly as documented above.
 ```
 mac/Sources/Engine/     protocol, discovery, adb bridge, sender, receiver
 mac/Sources/UI/         the window (SwiftUI, tokens in Tokens.swift)
-mac/Tests/              the 42-check end-to-end suite
+mac/Tests/              the end-to-end suite
 android/                Kotlin connector: receiver AND sender, the phone is a peer
 src/                    Node engine: the protocol definition, Linux/Windows CLI
 ```

@@ -52,10 +52,13 @@ function parseArgs(rest: string[]): { pos: string[]; flags: Map<string, string> 
   return { pos, flags };
 }
 
+// Binary units (MiB = 1024²) on purpose: the progress line reports MiB/s
+// right next to this, and mixing the two scales in one line is how numbers
+// start lying. The Mac app shows decimal MB; that is a different surface.
 function fmtBytes(n: number): string {
-  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 ** 3).toFixed(2)} GB`;
-  if (n >= 1024 * 1024) return `${(n / 1024 ** 2).toFixed(2)} MB`;
-  if (n >= 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n >= 1024 * 1024 * 1024) return `${(n / 1024 ** 3).toFixed(2)} GiB`;
+  if (n >= 1024 * 1024) return `${(n / 1024 ** 2).toFixed(2)} MiB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} KiB`;
   return `${n} B`;
 }
 
@@ -80,15 +83,18 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "receive": {
       const dest = pos[0] ?? "./received";
-      const beacon = flags.get("no-beacon") !== "true";
+      // `--beacon false` and `--no-beacon` both disable; the old double
+      // negative (`--no-beacon false` re-enabled) was a trap.
+      const noBeacon =
+        flags.has("no-beacon") || (flags.get("beacon") ?? "true").toLowerCase().startsWith("f");
       // The beacon name defaults to this machine's hostname, so a Linux or
       // Windows receiver announces itself as what it is instead of "macbook".
       const name = flags.get("name") ?? hostname();
       const rx = await startReceiver(dest, { port, streams, dataPort });
-      const b = beacon ? startBeacon(rx.address.port, name) : null;
+      const b = noBeacon ? null : startBeacon(rx.address.port, name);
       stdout.write(
         `hypersend receiver: dest=${dest} port=${rx.address.port}` +
-          `${beacon ? ` (beaconing as \"${name}\")` : ""}\n` +
+          `${noBeacon ? "" : ` (beaconing as \"${name}\")`}\n` +
           `waiting for a sender…\n`,
       );
       try {
@@ -126,6 +132,8 @@ async function main(): Promise<void> {
           const [h, dp] = entry.split(":");
           const dataPort = dp ? Number.parseInt(dp, 10) : undefined;
           return {
+            // The adb tunnel (port 44012) IS the USB cable; anything else is
+            // just another path.
             label: dataPort === 44012 ? "usb" : `path${i + 2}`,
             host: h ?? "127.0.0.1",
             ...(dataPort ? { dataPort } : {}),
@@ -143,6 +151,12 @@ async function main(): Promise<void> {
         `\nsent ${result.files} file(s), ${fmtBytes(result.bytes)} ` +
           `in ${(result.elapsedMs / 1000).toFixed(2)}s → ${result.mibsPerSec.toFixed(1)} MiB/s\n`,
       );
+      // Scripts must be able to tell a full batch from a partial one: a
+      // decline is not an error (exit 0), but it is REPORTED on stderr —
+      // which is where the sender already logs each decline.
+      if (result.skipped > 0) {
+        stdout.write(`${result.skipped} file(s) declined by the receiver\n`);
+      }
       return;
     }
 

@@ -158,11 +158,29 @@ class BeaconResponder(
                     val now = System.currentTimeMillis()
                     if (now - lastSend >= 500) {
                         lastSend = now
-                        val out = java.net.DatagramPacket(
-                            payload, payload.size,
-                            java.net.InetAddress.getByName("255.255.255.255"), Protocol.DISCOVERY_PORT,
-                        )
-                        s.send(out)
+                        // Many hotspots and APs FILTER global broadcast
+                        // (255.255.255.255) — on those networks this receiver
+                        // was invisible while a Mac receiver (which also sends
+                        // subnet-directed beacons) worked fine. Target the
+                        // subnet's own broadcast address too, plus loopback
+                        // for same-device test flows.
+                        val targets = buildList {
+                            add(java.net.InetAddress.getByName("255.255.255.255"))
+                            localIpAddress()?.let { v4 ->
+                                runCatching {
+                                    java.net.InetAddress.getByName(
+                                        v4.substringBeforeLast('.') + ".255",
+                                    )
+                                }.getOrNull()?.let { add(it) }
+                            }
+                            add(java.net.InetAddress.getByName("127.0.0.1"))
+                        }.distinct()
+                        for (target in targets) {
+                            val out = java.net.DatagramPacket(
+                                payload, payload.size, target, Protocol.DISCOVERY_PORT,
+                            )
+                            s.send(out)
+                        }
                     }
                     Thread.sleep(50)
                 } catch (e: InterruptedException) {
@@ -269,13 +287,27 @@ class ReceiverEngine(
         var dataServer: ServerSocket? = null
         try {
             sock.tcpNoDelay = true
-            sock.soTimeout = 30_000
+            // Long on purpose: control goes QUIET for whole spans of the
+            // protocol — the sender hashes the entire file before the offer,
+            // and nothing but nothing flows on control while chunks pump. The
+            // old 30 s here killed Mac→Android transfers of any file that took
+            // >30 s to hash (or any big file on a slow link) with a confusing
+            // "session ended: timeout". The 900 s ceiling matches the
+            // file-verify window the other senders grant us.
+            sock.soTimeout = 900_000
             val input = DataInputStream(BufferedInputStream(sock.getInputStream(), 1 shl 16))
             val out = DataOutputStream(BufferedOutputStream(sock.getOutputStream(), 1 shl 16))
 
             val hello = ControlMsg(Protocol.readMessage(input) ?: return)
             if (hello.type != "hello" || hello.version != Protocol.VERSION) {
-                log("protocol mismatch with sender")
+                // Fail FAST and audibly: the other side waits up to 15 s for
+                // its ready — dying silently made every sender burn its whole
+                // hello window on a peer that knew in the first millisecond.
+                log("protocol mismatch with sender (hello=${hello.type}, v${hello.version})")
+                val err = JSONObject()
+                err.put("type", "error")
+                err.put("message", "protocol version mismatch")
+                runCatching { Protocol.writeMessage(out, err) }
                 return
             }
 
@@ -463,7 +495,7 @@ class ReceiverEngine(
                 out,
                 transferId,
                 ok = false,
-                error = if (arrived) "sha256 mismatch" else "data streams ended early",
+                error = if (arrived) "sha256 mismatch — a corrupt resume prefix is the usual cause; the next attempt starts from zero" else "data streams ended early",
             )
             log("✗ ${active.file.name} failed — discarded")
         }
@@ -524,6 +556,12 @@ class ReceiverEngine(
      */
     private fun readChunks(s: Socket, box: ActiveBox) {
         s.tcpNoDelay = true
+        // Idle bound: a sender that vanishes without FIN used to leave this
+        // reader parked on readInt() forever, pinning its socket (and, via
+        // socketCount, stretching waitForComplete to the full 900 s). 15 s of
+        // silence on a healthy chunk stream is impossible — chunks are
+        // back-to-back for the life of the file.
+        s.soTimeout = 15_000
         val din = DataInputStream(BufferedInputStream(s.getInputStream(), 1 shl 16))
         var lastTick = System.currentTimeMillis()
         var lastBytes = 0L
@@ -533,7 +571,10 @@ class ReceiverEngine(
                 din.readByte() // flags: reserved (0x01 today)
                 val off = din.readLong()
                 val payloadLen = frameLen - (Protocol.CHUNK_HEADER_BYTES - 4)
-                if (payloadLen <= 0 || payloadLen > 32 * 1024 * 1024) {
+                // 64 MiB — the SAME ceiling the TS and Swift receivers enforce.
+                // Three implementations, three limits, was one bad resume away
+                // from an interop surprise.
+                if (payloadLen <= 0 || payloadLen > 64 * 1024 * 1024) {
                     throw java.io.IOException("bad chunk length: $payloadLen")
                 }
                 val buf = ByteArray(payloadLen)

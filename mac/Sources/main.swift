@@ -202,6 +202,9 @@ func runHeadlessSend(fileArguments: [String], from index: Int) -> Never {
         for (label, report) in summary.lanes.sorted(by: { $0.key < $1.key }) {
             print("  \(label): \(formattedBytes(report.bytes)) · \(formattedRate(report.bytesPerSec)) · \(report.chunks) chunks")
         }
+        if summary.declined > 0 {
+            print("declined by receiver: \(summary.declinedPaths.joined(separator: ", "))")
+        }
         print("RESULT \(String(format: "%.2f", summary.bytesPerSec / 1_000_000)) MB/s")
         exit(0)
     } catch {

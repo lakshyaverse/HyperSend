@@ -43,7 +43,10 @@ fi
 codesign --verify --strict "$APP" && echo "built $APP ($(du -sh "$APP" | cut -f1))"
 
 if [[ "$MODE" == "run" ]]; then
-  pkill -f "$APP/Contents/MacOS/HyperSend" 2>/dev/null || true
+  # Fixed-string exact match on the ABSOLUTE binary path: -f treats its
+  # pattern as a regex (the dots in this path matched ANY character) and a
+  # relative path matches nothing at all.
+  pkill -fx "$(pwd)/$APP/Contents/MacOS/HyperSend" 2>/dev/null || true
   sleep 0.3
   open "$APP"
   echo "launched"

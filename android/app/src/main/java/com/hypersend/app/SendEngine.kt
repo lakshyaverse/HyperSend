@@ -68,6 +68,8 @@ class SendEngine(
 
     class Summary(
         val files: Int,
+        /** Offers the receiver said no to; a decision, not a failure. */
+        val declined: Int = 0,
         val bytes: Long,
         val seconds: Double,
         val lanes: Map<String, LaneReport>,
@@ -180,6 +182,7 @@ class SendEngine(
 
             // ── per-file transfer ───────────────────────────────────────────
             var filesDone = 0
+            var declinedFiles = 0
             for ((index, file) in files.withIndex()) {
                 if (isCancelled) break
                 val size = sizes[index]
@@ -197,7 +200,15 @@ class SendEngine(
                 offer.put("sha256", digest)
                 Protocol.writeMessage(out, offer)
 
+                // null = declined: skip the file and keep the batch alive —
+                // the same semantic the Node engine honours and the Mac sender
+                // now matches. One decline used to abort the whole batch.
                 val offset = awaitOfferResponse(control, input, transferId, size)
+                if (offset == null) {
+                    log("declined $displayName — skipping")
+                    declinedFiles++
+                    continue
+                }
                 if (offset > 0) log("resuming $displayName at ${Protocol.humanBytes(offset)}")
 
                 if (size > offset && !isCancelled) {
@@ -235,7 +246,7 @@ class SendEngine(
             Protocol.writeMessage(out, batch)
 
             val lanesOut = synchronized(lock) { LinkedHashMap(laneStats) }
-            val summary = Summary(filesDone, synchronized(lock) { transmitted }, seconds, lanesOut)
+            val summary = Summary(filesDone, declinedFiles, synchronized(lock) { transmitted }, seconds, lanesOut)
             lastSummary = summary
             return summary
         } finally {
@@ -290,7 +301,8 @@ class SendEngine(
         }
     }
 
-    private fun awaitOfferResponse(socket: Socket, input: DataInputStream, transferId: String, size: Long): Long {
+    /** null = the receiver declined; the caller decides skip vs abort. */
+    private fun awaitOfferResponse(socket: Socket, input: DataInputStream, transferId: String, size: Long): Long? {
         // Generous on purpose: the Mac receiver may put this offer in front of
         // a person when auto-accept is off, and the answer takes as long as a
         // person takes.
@@ -300,9 +312,7 @@ class SendEngine(
             if (msg.transferId != transferId) continue
             when (msg.type) {
                 "offer-response" -> {
-                    if (!msg.accept) {
-                        throw IOException(msg.raw.optString("reason", "declined by receiver"))
-                    }
+                    if (!msg.accept) return null
                     return minOf(size, maxOf(0L, msg.offset))
                 }
                 "error" -> throw IOException("receiver: ${msg.message}")

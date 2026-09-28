@@ -52,12 +52,24 @@ export async function runLocalBench(sizeMb = 256): Promise<BenchResult> {
         { label: "loopback", host: "127.0.0.1", port: rx.address.port },
         { streams: 4 },
       );
-      const received = await rxDone;
+      const received = await rxDone.catch((err) => {
+        // Whichever side fails first, surface the sender's error — it says
+        // what actually went wrong — instead of crashing on the loser's
+        // unhandled rejection.
+        return sendPromise.then(
+          () => {
+            throw err;
+          },
+          (sendErr: unknown) => {
+            throw sendErr;
+          },
+        );
+      });
       const result = await sendPromise;
 
       const verified =
         received.length === 2 &&
-        received.every((f) => f.size === (f.path.includes("big") ? big.length : small.length));
+        received.every((f) => f.size === (f.path.endsWith("bench-big.bin") ? big.length : small.length));
 
       return { ...result, verified };
     } finally {

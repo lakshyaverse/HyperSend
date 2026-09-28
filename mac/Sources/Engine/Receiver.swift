@@ -412,7 +412,9 @@ final class ReceiveEngine {
                             "transferId": transferId,
                             "ok": false,
                         ]
-                        reply["error"] = arrived ? "sha256 mismatch — file discarded" : "data streams ended early"
+                        reply["error"] = arrived
+                            ? "sha256 mismatch — file discarded (a corrupt resume prefix is the usual cause; the next attempt starts from zero)"
+                            : "data streams ended early"
                         try control.writeJSON(reply)
                         hooks.log?("✗ \(file.name) failed — discarded")
                     }

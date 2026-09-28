@@ -146,8 +146,83 @@ test("declined offers are reported, not fatal", async () => {
     rx.stop();
 
     assert.equal(result.files, 1);
+    assert.equal(result.skipped, 1);
     assert.equal(received.length, 1);
     await stat(join(dest, "yes.bin"));
     await assert.rejects(stat(join(dest, "no.bin")));
+  });
+});
+
+test("a dead extra lane degrades to a slower send instead of failing", async () => {
+  await withDirs(async (src, dest) => {
+    const payload = randomBuf(5 * 1024 * 1024);
+    const p = join(src, "lanes.bin");
+    await writeFile(p, payload);
+
+    const rx = await startReceiver(dest, { streams: 2 });
+    const rxDone = rx.done;
+    // 127.0.0.1:9 (discard port) refuses every dial: the batch must still
+    // complete over the live loopback lane.
+    const result = await sendFiles(
+      [p],
+      [
+        { label: "loopback", host: "127.0.0.1", port: rx.address.port },
+        { label: "dead", host: "127.0.0.1", port: rx.address.port, dataPort: 9 },
+      ],
+      { streams: 2 },
+    );
+    const received = await rxDone;
+    rx.stop();
+
+    assert.equal(result.files, 1);
+    assert.equal(received.length, 1);
+    const got = await readFile(join(dest, "lanes.bin"));
+    assert.ok(got.equals(payload), "content must be byte-identical over the surviving lane");
+  });
+});
+
+test("progress reports the in-flight file's own bytes, not the batch", async () => {
+  await withDirs(async (src, dest) => {
+    const p1 = join(src, "one.bin");
+    const p2 = join(src, "two.bin");
+    await writeFile(p1, randomBuf(3 * 1024 * 1024));
+    await writeFile(p2, randomBuf(2 * 1024 * 1024));
+
+    const seen: Array<{ name: string; done: number; total: number }> = [];
+    const rx = await startReceiver(dest, { streams: 1 });
+    const rxDone = rx.done;
+    await sendFiles([p1, p2], { label: "loopback", host: "127.0.0.1", port: rx.address.port }, {
+      streams: 1,
+      onProgress: (p) => seen.push({ name: p.fileName, done: p.bytesDone, total: p.bytesTotal }),
+    });
+    await rxDone;
+    rx.stop();
+
+    const one = seen.filter((s) => s.name === "one.bin");
+    const two = seen.filter((s) => s.name === "two.bin");
+    assert.ok(one.length > 0, "file 1 progress ticked");
+    assert.ok(two.length > 0, "file 2 progress ticked");
+    for (const s of one) {
+      assert.ok(s.total === 3 * 1024 * 1024, "one.bin total is its own size");
+      assert.ok(s.done <= s.total, "one.bin done never exceeds its own total");
+    }
+    for (const s of two) {
+      assert.ok(s.total === 2 * 1024 * 1024, "two.bin total is its own size, not the batch");
+      assert.ok(s.done <= s.total, "two.bin done never exceeds its own total");
+    }
+  });
+});
+
+test("receiver exits cleanly after a batch (no dangling listener)", async () => {
+  await withDirs(async (src, dest) => {
+    const p = join(src, "exit.bin");
+    await writeFile(p, randomBuf(1024));
+    const rx = await startReceiver(dest, { streams: 1 });
+    const rxDone = rx.done;
+    await sendFiles([p], { label: "loopback", host: "127.0.0.1", port: rx.address.port });
+    await rxDone;
+    rx.stop();
+    const st = await stat(join(dest, "exit.bin"));
+    assert.equal(st.size, 1024);
   });
 });
