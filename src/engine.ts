@@ -67,7 +67,12 @@ export type EngineOptions = {
   streams?: number;
   onProgress?: ProgressCallback;
   /** Receiver-only: return false to decline an incoming file. */
-  confirmOffer?: (offer: { path: string; size: number }) => Promise<boolean> | boolean;
+  confirmOffer?: (offer: { path: string; size: number; transferId: string }) => Promise<boolean> | boolean;
+  /**
+   * Receiver-only: fires as each file is verified and kept — dedup skips
+   * included — so a UI can list arrivals live instead of polling the disk.
+   */
+  onReceived?: (file: ReceivedFile) => void;
 };
 
 export type SendTarget = {
@@ -279,6 +284,7 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
                 const existing = await sha256File(absPath);
                 if (existing === offer.sha256) {
                   received.push({ path: absPath, size: offer.size, sha256: offer.sha256 });
+                  opts.onReceived?.({ path: absPath, size: offer.size, sha256: offer.sha256 });
                   await writeControl(controlSock, {
                     type: "offer-response",
                     transferId: offer.transferId,
@@ -302,7 +308,7 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
           }
 
           const accepted = opts.confirmOffer
-            ? await opts.confirmOffer({ path: safePath, size: offer.size })
+            ? await opts.confirmOffer({ path: safePath, size: offer.size, transferId: offer.transferId })
             : true;
           if (!accepted) {
             await writeControl(controlSock, {
@@ -343,6 +349,7 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
             return;
             }
             received.push({ path: absPath, size: offer.size, sha256: hash });
+            opts.onReceived?.({ path: absPath, size: offer.size, sha256: hash });
             await writeControl(controlSock, {
               type: "file-done",
               transferId: offer.transferId,
@@ -454,6 +461,7 @@ export async function startReceiver(destDir: string, opts: EngineOptions = {}): 
           });
           } else {
             received.push({ path: f.absPath, size: f.totalSize, sha256: hash });
+            opts.onReceived?.({ path: f.absPath, size: f.totalSize, sha256: hash });
             await writeControl(controlSock, {
               type: "file-done",
               transferId: f.transferId,
@@ -731,7 +739,10 @@ export async function sendFiles(
 
     const resp = (await waitFor(
       (m) => m.type === "offer-response" && m.transferId === transferId,
-      15_000,
+      // The receiver may put this offer in front of a *person* (GUI prompt);
+      // the answer takes as long as a person takes. Matches the Swift sender
+      // and the GUI's 120 s auto-decline.
+      120_000,
     )) as OfferResponseMessage;
     if (!resp.accept) {
       // Decline is a decision, not a failure: log it, keep the batch moving.

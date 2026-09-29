@@ -4,7 +4,8 @@
 
 A Mac app that sends files to Android over **Wi-Fi and the USB cable at the
 same time**, and checks every byte with SHA-256. No accounts, no cloud, no
-dependencies. The same engine ships as a CLI for Linux and Windows.
+dependencies. The same engine ships as a CLI — and a browser GUI
+(`hypersend serve`) — for Linux and Windows.
 
 **Download:** [HyperSend.dmg from Releases](https://github.com/lakshyaverse/HyperSend/releases/latest)
 — open it, drag the app to Applications, done. No Xcode, no terminal, no
@@ -150,6 +151,34 @@ The USB lane is simpler than on the Mac: Linux and Windows ship the tether
 drivers macOS lacks, so a cabled phone usually shows up as a plain network
 interface and the cable is just a second path — no `adb forward` needed. When
 a driver is missing anyway, the tunnel works exactly as documented above.
+
+### Browser GUI: `hypersend serve`
+
+Windows and Linux get a real graphical interface without a GUI toolkit: the
+process serves its own page, and the browser is the app.
+
+```bash
+./bin/hypersend serve ~/Downloads/HyperSend                  # Linux/macOS
+bin\hypersend.cmd serve %USERPROFILE%\Downloads\HyperSend    # Windows
+```
+
+Open the printed URL (`http://<machine>:44020`) in any browser on the
+network — phones included. The page is one self-contained HTML file in the
+app's own visual language, no CDN, no build step:
+
+- **Drag files onto the page** to send them to any discovered device; progress
+  streams live while the bytes move, over the same bonded-lane engine the
+  other apps use.
+- **Incoming offers surface as a prompt** — Accept or Decline in the page; an
+  unanswered offer declines itself after 120 seconds.
+- The process also **beacons and receives** like plain `receive` mode, so Mac
+  and Android senders see it as a peer and files land in the destination
+  folder even with no browser open.
+
+Uploads staged through the browser are buffered and capped at 512 MB
+(`HYPERSEND_MAX_UPLOAD` bytes to change); bigger files belong on the CLI,
+which streams straight from disk. The GUI port falls back to a free one when
+44020 is taken — the actual URL is always printed on start.
 
 ## Code
 

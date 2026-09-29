@@ -18,7 +18,7 @@ export const DISCOVERY_PORT = 44011;
 const MAGIC = "hypersend-beacon-v1";
 const BEACON_INTERVAL_MS = 500;
 
-export type DiscoveredPeer = { host: string; port: number; name: string };
+export type DiscoveredPeer = { host: string; port: number; name: string; lastSeen?: number };
 
 type BeaconMsg = { magic: string; port: number; name: string };
 
@@ -92,6 +92,79 @@ export function startBeacon(controlPort: number, name: string): { stop: () => vo
   return { stop: closeSafely };
 }
 
+/**
+ * Sender side, UI flavor: keep listening and maintain a live peer table.
+ * Returns a stop() plus a snapshot getter; `onChange` fires whenever the set
+ * changes. Self-beacons are not filtered here — the caller (serve mode) knows
+ * its own beacon and drops it by source address.
+ */
+export function startBeaconWatcher(opts: {
+  onChange?: (peers: DiscoveredPeer[]) => void;
+} = {}): { stop: () => void; peers: () => DiscoveredPeer[] } {
+  const sock = createSocket({ type: "udp4", reuseAddr: true });
+  const peers = new Map<string, DiscoveredPeer>();
+  let stopped = false;
+  const emit = (): void => {
+    opts.onChange?.([...peers.values()]);
+  };
+
+  sock.on("message", (buf: Buffer, rinfo: RemoteInfo) => {
+    if (stopped) return;
+    const msg = decodeBeacon(buf);
+    if (!msg) return;
+    const key = `${rinfo.address}:${msg.port}`;
+    const existing = peers.get(key);
+    const now = Date.now();
+    if (existing) {
+      existing.name = msg.name;
+      existing.lastSeen = now;
+    } else {
+      peers.set(key, { host: rinfo.address, port: msg.port, name: msg.name, lastSeen: now });
+      emit();
+    }
+  });
+  sock.on("error", (err) => {
+    console.error(`[hypersend] watcher disabled: ${err.message}`);
+  });
+
+  try {
+    // Ephemeral port: the watcher is one of several listeners on a machine
+    // that may also be beaconing; it does not need :44011.
+    sock.bind(0, () => {
+      sock.setBroadcast(true);
+      sock.addMembership?.("239.255.44.11");
+    });
+  } catch {
+    // No multicast/broadcast sockets — the UI still works with manual entry.
+  }
+
+  const sweep = setInterval(() => {
+    if (stopped) return;
+    const cutoff = Date.now() - 7_500;
+    let changed = false;
+    for (const [key, p] of peers) {
+      if (p.lastSeen !== undefined && p.lastSeen < cutoff) {
+        peers.delete(key);
+        changed = true;
+      }
+    }
+    if (changed) emit();
+  }, 2_000);
+
+  return {
+    stop: () => {
+      stopped = true;
+      clearInterval(sweep);
+      try {
+        sock.close();
+      } catch {
+        // ignore
+      }
+    },
+    peers: () => [...peers.values()],
+  };
+}
+
 /** Sender side: listen for beacons, resolve the first matching peer. */
 export async function discoverPeer(timeoutMs = 5_000, wantName?: string): Promise<DiscoveredPeer> {
   const sock = createSocket({ type: "udp4", reuseAddr: true });
@@ -102,7 +175,7 @@ export async function discoverPeer(timeoutMs = 5_000, wantName?: string): Promis
     if (!msg) return;
     if (wantName && msg.name !== wantName) return;
     if (!found.some((p) => p.host === rinfo.address && p.port === msg.port)) {
-      found.push({ host: rinfo.address, port: msg.port, name: msg.name });
+      found.push({ host: rinfo.address, port: msg.port, name: msg.name, lastSeen: Date.now() });
     }
   });
   // Discovery must never crash the sender either.

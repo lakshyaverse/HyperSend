@@ -4,6 +4,7 @@
  *
  *   hypersend receive [destDir]          — be a receiver (beacon on by default)
  *   hypersend send <files...> [--to h]   — send files (auto-discovers receiver)
+ *   hypersend serve [destDir]            — browser GUI + receiver in one process
  *   hypersend bench [--size N]           — localhost throughput sanity test
  */
 
@@ -20,12 +21,16 @@ function usage(): never {
       "",
       "  hypersend receive [destDir] [--port N] [--data-port N] [--streams N]",
       "  hypersend send <file...> [--to host] [--extra-path ip[:dataPort],...] [--streams N]",
+      "  hypersend serve [destDir] [--ui-port N] [--port N] [--name NAME]",
       "",
       "  USB path (no driver needed): adb forward tcp:44012 tcp:44012",
       "    then: hypersend send <file> --to <wifi-ip> --extra-path 127.0.0.1:44012",
       "  hypersend bench [--size MB]",
       "",
-      `Defaults: port ${DEFAULT_PORT} (control+data), discovery beacon on UDP ${DISCOVERY_PORT}.`,
+      "  serve runs a browser GUI (drag-and-drop, live progress, incoming-file",
+      "  prompts) and stays a full LAN receiver at the same time.",
+      "",
+      `Defaults: port ${DEFAULT_PORT} (control+data), discovery beacon on UDP ${DISCOVERY_PORT}, GUI on 44020.`,
     ].join("\n") + "\n",
   );
   exit(0);
@@ -158,6 +163,36 @@ async function main(): Promise<void> {
         stdout.write(`${result.skipped} file(s) declined by the receiver\n`);
       }
       return;
+    }
+
+    case "serve": {
+      const { startServe } = await import("./serve.js");
+      const dest = pos[0] ?? "./received";
+      const uiFlag = flags.get("ui-port");
+      // A literal 0 is meaningful (bind an ephemeral port); only absent/garbage
+      // falls back to the default.
+      const uiPort = uiFlag !== undefined && Number.parseInt(uiFlag, 10) === 0 ? 0 : Number.parseInt(uiFlag ?? "", 10) || undefined;
+      const name = flags.get("name") ?? hostname();
+      const handle = await startServe({
+        destDir: dest,
+        uiPort,
+        port,
+        dataPort,
+        streams,
+        name,
+        maxUploadBytes: process.env.HYPERSEND_MAX_UPLOAD
+          ? Number(process.env.HYPERSEND_MAX_UPLOAD)
+          : undefined,
+      });
+      stdout.write(
+        `hypersend gui: ${handle.url}\n` +
+          `receiving into ${dest} · beaconing as \"${name}\"\n` +
+          `open the URL in any browser on this network — Ctrl-C to stop\n`,
+      );
+      // Serve mode runs until interrupted; the SIGINT default tears the
+      // process down and the OS closes every socket.
+      await new Promise<never>(() => {});
+      return; // unreachable — keeps the switch exhaustive for the typechecker
     }
 
     case "bench": {
