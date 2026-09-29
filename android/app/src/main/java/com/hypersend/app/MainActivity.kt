@@ -16,10 +16,14 @@ import android.os.Bundle
 import android.os.Environment
 import android.os.IBinder
 import android.provider.OpenableColumns
+import android.text.InputType
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -74,6 +78,7 @@ class MainActivity : Activity() {
 
     private val sendRunning = AtomicBoolean(false)
     private val sendEngine = AtomicReference<SendEngine?>(null)
+    private var pendingPermissionAction: (() -> Unit)? = null
     private val probeGeneration = AtomicInteger(0)
     private val lastProgress = AtomicReference<SendEngine.Progress?>(null)
 
@@ -85,6 +90,17 @@ class MainActivity : Activity() {
     private var usbLaneUp = false
     private var sendLaneUsb = true
     private var socketsPerLane = 2
+
+    /**
+     * Addresses typed in by hand. Discovery only reaches this phone's own
+     * subnet, and a Mac reached over a cable may never beacon here at all, so
+     * the manual route is a real second source of peers — not a fallback that
+     * only pretends to exist.
+     */
+    private val manualPeers = ArrayList<Net.PeerRec>()
+
+    /** Every receiver switch on every screen, so one state drives them all. */
+    private val receiverToggles = ArrayList<GlassToggle>()
 
     private var multicastLock: WifiManager.MulticastLock? = null
     private var watcher: Net.BeaconWatcher? = null
@@ -147,6 +163,7 @@ class MainActivity : Activity() {
         Theme.load(this)
         pal = Theme.current(this)
         socketsPerLane = prefs().getInt("streams", 2)
+        loadManualPeers()
 
         window.apply {
             addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS)
@@ -204,12 +221,6 @@ class MainActivity : Activity() {
 
         startWatcher()
         refreshReceive()
-
-        if (Build.VERSION.SDK_INT >= 33 &&
-            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
-        }
     }
 
     private fun prefs() = getSharedPreferences("hypersend", Context.MODE_PRIVATE)
@@ -525,7 +536,7 @@ class MainActivity : Activity() {
         val addByIp = label(this, "+  Add by IP address", Type.SUB, pal.textDim, Type.medium)
             .apply { setPadding(0, dpi(12f), 0, dpi(2f)) }
         addByIp.isClickable = true
-        addByIp.setOnClickListener { toast("Manual entry arrives with the discovery rewrite.") }
+        addByIp.setOnClickListener { v -> Motion.haptic(v); promptForAddress() }
         devices.addView(addByIp, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         addToStack(stack, devices)
@@ -603,16 +614,9 @@ class MainActivity : Activity() {
         }
         recHead.addView(sectionLabel("RECEIVE"), LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        receiveToggle = GlassToggle(this, pal, true)
-        receiveToggle.onChanged = { on ->
-            if (on) startForegroundService(Intent(this, ReceiveService::class.java))
-            else {
-                service?.setRunning(false)
-                stopService(Intent(this, ReceiveService::class.java))
-            }
-            console.log(if (on) "receiver armed" else "receiver stopped", if (on) pal.ok else pal.warn)
-            root.postDelayed({ refreshReceive() }, 120)
-        }
+        receiveToggle = GlassToggle(this, pal, receiverWanted())
+        receiveToggle.onChanged = { on -> setReceiverWanted(on) }
+        receiverToggles.add(receiveToggle)
         recHead.addView(receiveToggle, LinearLayout.LayoutParams(dpi(54f), dpi(32f)))
         receive.addView(recHead, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -750,7 +754,7 @@ class MainActivity : Activity() {
      * getAllByName on the UI thread is an instant NetworkOnMainThreadException.
      */
     private fun refreshDevices() {
-        val peers = watcher?.snapshot() ?: emptyList()
+        val peers = allPeers()
         val generation = probeGeneration.incrementAndGet()
         renderDevices(peers, probing = true, resolved = emptyMap())
         if (peers.isEmpty()) {
@@ -862,7 +866,7 @@ class MainActivity : Activity() {
 
     private fun updateStatus() {
         if (!::statusLabel.isInitialized) return
-        val peers = watcher?.snapshot() ?: emptyList()
+        val peers = allPeers()
         when {
             peers.isEmpty() -> { statusDot.set(pal.warn, true); statusLabel.text = "scanning…" }
             usbLaneUp -> { statusDot.set(pal.ok, true); statusLabel.text = "2 lanes" }
@@ -871,8 +875,139 @@ class MainActivity : Activity() {
     }
 
     private fun selectedPeer(): Net.PeerRec? {
-        val peers = watcher?.snapshot() ?: return null
+        val peers = allPeers()
         return peers.firstOrNull { it.host + ":" + it.port == selectedPeerKey } ?: peers.firstOrNull()
+    }
+
+    /** Beacons, plus anything the user added by hand. */
+    private fun allPeers(): List<Net.PeerRec> {
+        val found = watcher?.snapshot() ?: emptyList()
+        if (manualPeers.isEmpty()) return found
+        val keyed = found.mapTo(HashSet()) { it.host + ":" + it.port }
+        return found + manualPeers.filter { it.host + ":" + it.port !in keyed }
+    }
+
+    private fun saveManualPeers() {
+        prefs().edit().putString(
+            "manualPeers",
+            manualPeers.joinToString("\n") { "${it.name}\t${it.host}\t${it.port}" },
+        ).apply()
+    }
+
+    private fun loadManualPeers() {
+        manualPeers.clear()
+        prefs().getString("manualPeers", "").orEmpty().split('\n').forEach { line ->
+            val parts = line.split('\t')
+            val port = parts.getOrNull(2)?.toIntOrNull()
+            if (parts.size == 3 && port != null) {
+                manualPeers.add(Net.PeerRec(parts[0], parts[1], port, System.currentTimeMillis()))
+            }
+        }
+    }
+
+    /** A sheet with one field, because "Add by IP" used to promise this and not do it. */
+    private fun promptForAddress() {
+        val s = Sheet(this, pal)
+        val card = GlassCard(this, 28f, 2, true, pal).apply {
+            setPadding(dpi(18f), dpi(20f), dpi(18f), dpi(18f))
+        }
+        card.addView(label(this, "Add a Mac by address", Type.HEADLINE, pal.textPrimary, Type.medium, -0.015f))
+        card.addView(label(
+            this,
+            "Discovery only sees this phone's own subnet. Type the address of a Mac it cannot reach — another network, or a cable-only link.",
+            Type.SUB, pal.textSecondary,
+        ).apply {
+            setPadding(0, dpi(7f), 0, 0)
+            setLineSpacing(0f, 1.28f)
+        })
+
+        val field = EditText(this).apply {
+            hint = "10.102.155.240"
+            setTextColor(pal.textPrimary)
+            setHintTextColor(Ink.withAlpha(pal.textDim, 0.85f))
+            typeface = Type.mono
+            setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, Type.CARD)
+            background = null
+            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_URI
+            isSingleLine = true
+            imeOptions = EditorInfo.IME_ACTION_DONE
+            setPadding(dpi(13f), dpi(12f), dpi(13f), dpi(12f))
+        }
+        // The field sits in a recessed well, so it reads as a slot in the glass
+        // rather than a bare platform EditText dropped onto it.
+        val well = GlassCard(this, 14f, 0, false, pal)
+        well.addView(field, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+        card.addView(well, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+        ).apply { topMargin = dpi(16f) })
+
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val commit = { if (addManualPeer(field.text.toString())) s.dismiss() }
+        val cancel = PillButton(this, "Cancel", PillButton.GHOST, null, pal)
+        cancel.setOnClickListener { s.dismiss() }
+        Motion.pressable(cancel)
+        val add = PillButton(this, "Add device", PillButton.FILLED, null, pal)
+        add.setOnClickListener { commit() }
+        Motion.pressable(add)
+        field.setOnEditorActionListener { _, _, _ ->
+            commit()
+            true
+        }
+        row.addView(cancel, LinearLayout.LayoutParams(0, dpi(50f), 1f))
+        row.addView(gapH(this, 10f))
+        row.addView(add, LinearLayout.LayoutParams(0, dpi(50f), 1f))
+        card.addView(row, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, dpi(50f),
+        ).apply { topMargin = dpi(18f) })
+
+        s.content(card)
+        root.addView(s, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        s.onDismissed = { root.setTag(R.id.sheet_tag, null) }
+        root.setTag(R.id.sheet_tag, s)
+        s.present()
+        root.postDelayed({
+            field.requestFocus()
+            (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+                .showSoftInput(field, InputMethodManager.SHOW_IMPLICIT)
+        }, 340)
+    }
+
+    /**
+     * Accepts `host`, `host:port` or a pasted URL, and refuses anything whose
+     * shape is wrong before it ever reaches DNS.
+     */
+    private fun addManualPeer(raw: String): Boolean {
+        val trimmed = raw.trim()
+            .removePrefix("http://").removePrefix("https://")
+            .substringBefore('/')
+        if (trimmed.isEmpty()) {
+            toast("type the Mac's address")
+            return false
+        }
+        val host = trimmed.substringBefore(':')
+        val port = trimmed.substringAfter(':', "").toIntOrNull()?.takeIf { it in 1..65535 }
+            ?: Protocol.DEFAULT_PORT
+        val plausible = host.isNotEmpty() && host.length <= 253 &&
+            host.all { it.isLetterOrDigit() || it == '.' || it == ':' || it == '-' }
+        if (!plausible) {
+            toast("that does not look like an address")
+            return false
+        }
+        val key = "$host:$port"
+        manualPeers.removeAll { it.host + ":" + it.port == key }
+        manualPeers.add(Net.PeerRec("Mac at $host", host, port, System.currentTimeMillis()))
+        saveManualPeers()
+        selectedPeerKey = key
+        console.log("added $key by hand", pal.accent)
+        refreshDevices()
+        refreshHome()
+        toast("added $host")
+        return true
     }
 
     // ── Home state ───────────────────────────────────────────────────────
@@ -962,11 +1097,64 @@ class MainActivity : Activity() {
 
     // ── Receive state ────────────────────────────────────────────────────
 
+    /**
+     * The one owner of "is the receiver armed". Home's switch and Settings'
+     * "Accept automatically" are the same setting; before this they were two
+     * controls that disagreed, and neither survived a restart.
+     */
+    private fun receiverWanted(): Boolean = prefs().getBoolean("receiverOn", true)
+
+    private fun setReceiverWanted(on: Boolean) {
+        prefs().edit().putBoolean("receiverOn", on).apply()
+        if (on) {
+            // Ask for notifications only now, when arming the receiver actually
+            // needs them. This used to fire from onCreate, so the first thing
+            // anyone ever saw of HyperSend was a system dialog on top of the
+            // window — which reads as "this app is broken", not as a permission
+            // prompt. Asking alongside the action is what the platform wants too.
+            ensureNotificationPermission {
+                startForegroundService(Intent(this, ReceiveService::class.java))
+            }
+        } else {
+            service?.setRunning(false)
+            stopService(Intent(this, ReceiveService::class.java))
+        }
+        console.log(if (on) "receiver armed" else "receiver stopped", if (on) pal.ok else pal.warn)
+        root.postDelayed({ refreshReceive() }, 120)
+    }
+
+    private fun ensureNotificationPermission(then: () -> Unit) {
+        if (Build.VERSION.SDK_INT < 33 ||
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
+        ) {
+            then()
+            return
+        }
+        pendingPermissionAction = then
+        requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFICATIONS)
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == REQ_NOTIFICATIONS) {
+            // The service is a foreground service, so it runs whether or not
+            // this was granted — the answer only decides whether the ongoing
+            // notification is visible. Either way, carry on.
+            val action = pendingPermissionAction
+            pendingPermissionAction = null
+            action?.invoke()
+        }
+    }
+
     private fun refreshReceive() {
         val svc = service
         val running = svc?.isRunning == true
-        if (::receiveToggle.isInitialized && receiveToggle.isOn != running) {
-            receiveToggle.setChecked(running, animate = false)
+        receiverToggles.forEach { toggle ->
+            if (toggle.isOn != running) toggle.setChecked(running, animate = false)
         }
         val count = svc?.engine?.receivedCount ?: 0
         if (::receivedCount.isInitialized) {
@@ -1133,12 +1321,9 @@ class MainActivity : Activity() {
         }
         auto.addView(label(this, "Accept automatically", Type.SUB, pal.textPrimary), LinearLayout.LayoutParams(
             0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        val autoToggle = GlassToggle(this, pal, true)
-        autoToggle.onChanged = { on ->
-            if (on) startForegroundService(Intent(this, ReceiveService::class.java))
-            else service?.setRunning(false)
-            root.postDelayed({ refreshReceive() }, 120)
-        }
+        val autoToggle = GlassToggle(this, pal, receiverWanted())
+        autoToggle.onChanged = { on -> setReceiverWanted(on) }
+        receiverToggles.add(autoToggle)
         auto.addView(autoToggle, LinearLayout.LayoutParams(dpi(54f), dpi(32f)))
         receive.addView(auto, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -1312,17 +1497,24 @@ class MainActivity : Activity() {
 
     private fun openSendSheet() {
         val s = sheet ?: buildTransferSheet().also { sheet = it }
-        setSheetMode(0)
+        // Reopening mid-transfer has to land on the live view, not the picker.
+        setSheetMode(if (sendRunning.get()) 1 else 0)
         if (s.parent == null) {
             root.addView(s, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             root.setTag(R.id.sheet_tag, s)
-            s.onDismissed = { root.setTag(R.id.sheet_tag, null) }
+            s.onDismissed = {
+                root.setTag(R.id.sheet_tag, null)
+                // The sheet is cached for reuse, so its ambient loop has to be
+                // stopped by hand or it keeps invalidating a detached view.
+                sheetBall.stopAmbient()
+            }
             s.present()
         } else {
             root.setTag(R.id.sheet_tag, s)
             s.present()
         }
+        sheetBall.startAmbient()
     }
 
     private fun buildTransferSheet(): Sheet {
@@ -1512,7 +1704,7 @@ class MainActivity : Activity() {
     private fun renderSheetDevices() {
         if (!::sheetDevices.isInitialized) return
         sheetDevices.removeAllViews()
-        val peers = watcher?.snapshot() ?: emptyList()
+        val peers = allPeers()
         if (peers.isEmpty()) {
             sheetDevices.addView(label(this, "Scanning…", Type.SUB, pal.textDim))
             return
@@ -1630,8 +1822,13 @@ class MainActivity : Activity() {
                     },
                 )
                 dir.deleteRecursively()
+                // Cleared *before* the UI callback is posted: the callback calls
+                // refreshHome(), which branches on this flag, and leaving it set
+                // made the finished-transfer screen depend on which thread won.
+                sendRunning.set(false)
                 runOnUiThread { onSendDone(summary) }
             } catch (e: Exception) {
+                sendRunning.set(false)
                 runOnUiThread { onSendFailed(e) }
             } finally {
                 sendEngine.set(null)
@@ -1714,6 +1911,8 @@ class MainActivity : Activity() {
         )
         heroMeter.setFraction(1f)
         combinedFill.setFraction(1f)
+        // refreshHome() below hides the meter when idle; a finished transfer
+        // still has a result worth leaving on screen.
         combinedRate.text = String.format(Locale.US, "%.1f MB/s avg", mbps)
         laneWifiMeter.setActive(false)
         laneUsbMeter.setActive(false)
@@ -1730,6 +1929,13 @@ class MainActivity : Activity() {
             Locale.US, "%s · %.1f MB/s · verified", Protocol.humanBytes(summary.bytes), mbps,
         )
         heroMeta.visibility = View.VISIBLE
+        heroMeter.visibility = View.VISIBLE
+        heroCaption.text = if (summary.declined > 0) {
+            "Every byte verified with SHA-256 on arrival · ${summary.declined} declined by the receiver."
+        } else {
+            "Every byte verified with SHA-256 on arrival."
+        }
+        combinedRate.text = String.format(Locale.US, "%.1f MB/s avg", mbps)
         if (::sheetSub.isInitialized) {
             sheetSub.text = String.format(
                 Locale.US, "%d file(s) · %s · %.1fs · %.1f MB/s",
@@ -1760,6 +1966,9 @@ class MainActivity : Activity() {
         refreshHome()
         heroTitle.text = "Send failed"
         heroCaption.text = e.message?.take(120) ?: ""
+        // refreshHome() resets the lane header to "idle"; the failure is the
+        // last thing that happened, so it wins.
+        combinedRate.text = "failed"
         toast("send failed — see activity")
     }
 
@@ -1868,5 +2077,6 @@ class MainActivity : Activity() {
         /** adb reverse tunnel as seen from the phone: 127.0.0.1:44014 → Mac :44012. */
         const val USB_REVERSE_PORT = 44014
         private const val REQ_FILES = 11
+        private const val REQ_NOTIFICATIONS = 12
     }
 }

@@ -6,7 +6,7 @@ import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
-import android.graphics.Outline
+import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RadialGradient
@@ -16,12 +16,12 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.ViewOutlineProvider
 import android.animation.ValueAnimator
 import android.view.animation.OvershootInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.io.File
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
@@ -51,68 +51,42 @@ import kotlin.math.roundToInt
 class SceneView(ctx: Context, var pal: Pal) : View(ctx) {
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val grain = Paint(Paint.ANTI_ALIAS_FLAG)
-    private var sky: Shader? = null
-    private var bloomA: Shader? = null
-    private var bloomB: Shader? = null
-    private var bloomC: Shader? = null
-    private var vignette: Shader? = null
+    private var layers: List<SceneLayer> = emptyList()
+    private var builtFor = Float.NaN
     private var drift = 0f
     private var lastInvalidate = 0L
     private var animator: ValueAnimator? = null
 
     init {
-        grain.shader = Grain.shader()
-        grain.alpha = pal.grainAlpha
         setWillNotDraw(false)
+        // Lets the lens be put into probe mode from adb instead of by rebuilding.
+        Glass.debugFile = File(ctx.filesDir, "hs_dbg")
     }
 
     fun setPalette(p: Pal) {
         pal = p
-        grain.alpha = p.grainAlpha
-        sky = null; bloomA = null; bloomB = null; bloomC = null; vignette = null
+        layers = emptyList()
         // The glass samples this snapshot, so it has to follow the palette.
-        Glass.snapshot(width, height, p)
+        Glass.snapshot(width, height, p, drift)
         invalidate()
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
-        build(w.toFloat(), h.toFloat())
-        Glass.snapshot(w, h, pal)
-    }
-
-    private fun build(w: Float, h: Float) {
-        if (w <= 0f || h <= 0f) return
-        sky = LinearGradient(
-            0f, 0f, w * 0.18f, h,
-            intArrayOf(pal.skyTop, pal.skyMid, pal.skyBottom),
-            floatArrayOf(0f, 0.52f, 1f), Shader.TileMode.CLAMP,
-        )
-        bloom(w, h)
-        vignette = LinearGradient(
-            0f, h * 0.62f, 0f, h,
-            intArrayOf(Ink.withAlpha(pal.skyBottom, 0f), Ink.withAlpha(pal.skyBottom, 0.85f)),
-            null, Shader.TileMode.CLAMP,
-        )
+        layers = emptyList()
+        Glass.snapshot(w, h, pal, drift)
     }
 
     /**
-     * Wide and soft on purpose: the glass refracts these, and a tight bloom
-     * turns into a visible patch behind whatever panel sits over it. The layout
-     * itself lives in `blooms()` so Glass.snapshot() can reproduce it exactly.
+     * The scene, as a stack of full-bleed layers. Built from `sceneLayers()` so
+     * that the window and the lens snapshot cannot disagree about it.
      */
-    private fun bloom(w: Float, h: Float) {
-        val laid = blooms(w, h, pal, drift)
-        bloomA = radialFor(laid[0])
-        bloomB = radialFor(laid[1])
-        bloomC = radialFor(laid[2])
+    private fun ensureLayers() {
+        if (layers.isNotEmpty() && builtFor == drift) return
+        if (width <= 0 || height <= 0) return
+        builtFor = drift
+        layers = sceneLayers(width.toFloat(), height.toFloat(), pal, drift, 1f)
     }
-
-    private fun radialFor(b: Bloom) = RadialGradient(
-        b.cx, b.cy, b.radius,
-        intArrayOf(b.color, Ink.withAlpha(b.color, 0f)), null, Shader.TileMode.CLAMP,
-    )
 
     fun startAmbient() {
         if (animator != null) return
@@ -123,9 +97,14 @@ class SceneView(ctx: Context, var pal: Pal) : View(ctx) {
             addUpdateListener {
                 drift = it.animatedValue as Float
                 val now = System.currentTimeMillis()
-                if (now - lastInvalidate > 48) {
+                // The blooms are enormous and soft, so they only need a few
+                // frames a second to read as alive. Anything faster re-runs the
+                // lens on every glass surface for no visible gain.
+                if (now - lastInvalidate > 220) {
                     lastInvalidate = now
-                    build(width.toFloat(), height.toFloat())
+                    // The snapshot has to be refreshed alongside the window, or
+                    // the glass goes on refracting blooms that have since moved.
+                    Glass.snapshot(width, height, pal, drift)
                     invalidate()
                 }
             }
@@ -139,32 +118,87 @@ class SceneView(ctx: Context, var pal: Pal) : View(ctx) {
     }
 
     override fun onDraw(canvas: Canvas) {
-        if (sky == null) build(width.toFloat(), height.toFloat())
-        paint.shader = sky
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-
-        paint.shader = bloomA
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-        paint.shader = bloomB
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-        paint.shader = bloomC
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
-
-        paint.shader = null
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), grain)
-
-        paint.shader = vignette
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), paint)
+        ensureLayers()
+        val w = width.toFloat()
+        val h = height.toFloat()
+        layers.forEach { layer ->
+            paint.shader = layer.shader
+            paint.alpha = layer.alpha
+            canvas.drawRect(0f, 0f, w, h, paint)
+        }
+        paint.alpha = 255
         paint.shader = null
     }
 }
 
+/** One full-bleed pass of the scene: a shader and the alpha to draw it at. */
+internal class SceneLayer(val shader: Shader, val alpha: Int = 255)
+
+/**
+ * The scene, back to front, in one place.
+ *
+ * `SceneView` paints this into the window and `Glass` paints it into the bitmap
+ * the lens samples. Those two must agree pixel for pixel — if the glass bends a
+ * backdrop that is not the one behind it, every surface picks up an artefact
+ * that no amount of tuning the optics can remove, because the optics are not
+ * what is wrong.
+ *
+ * This is the second time this file has had to learn that lesson. The blooms
+ * were unified first; the **grain and the vignette were left out of the
+ * snapshot**, and the grain is the only thing giving the sky any texture at
+ * all. So the window's sky was speckled and the lens's copy was smooth, which
+ * is why every card wore a flat, off-colour band along its edge: the refraction
+ * was faithfully magnifying a backdrop that did not exist.
+ *
+ * @param grainScale the snapshot is rendered at half scale, so its grain has to
+ *                   be half scale with it or the speckle the glass bends would
+ *                   be twice the size of the speckle on screen.
+ */
+internal fun sceneLayers(
+    w: Float,
+    h: Float,
+    pal: Pal,
+    drift: Float,
+    grainScale: Float,
+): List<SceneLayer> {
+    if (w <= 0f || h <= 0f) return emptyList()
+    val out = ArrayList<SceneLayer>(6)
+    out += SceneLayer(
+        LinearGradient(
+            0f, 0f, w * 0.18f, h,
+            intArrayOf(pal.skyTop, pal.skyMid, pal.skyBottom),
+            floatArrayOf(0f, 0.52f, 1f), Shader.TileMode.CLAMP,
+        ),
+    )
+    blooms(w, h, pal, drift).forEach { b ->
+        out += SceneLayer(
+            RadialGradient(
+                b.cx, b.cy, b.radius,
+                intArrayOf(b.color, Ink.withAlpha(b.color, 0f)), null, Shader.TileMode.CLAMP,
+            ),
+        )
+    }
+    out += SceneLayer(Grain.shader(grainScale), pal.grainAlpha)
+    out += SceneLayer(
+        LinearGradient(
+            0f, h * 0.62f, 0f, h,
+            intArrayOf(Ink.withAlpha(pal.skyBottom, 0f), Ink.withAlpha(pal.skyBottom, 0.85f)),
+            null, Shader.TileMode.CLAMP,
+        ),
+    )
+    return out
+}
+
 /** Deterministic xorshift grain tile — the same speckle the Mac composites. */
 object Grain {
-    private var shader: BitmapShader? = null
+    private val cache = HashMap<Float, BitmapShader>()
 
-    fun shader(): BitmapShader {
-        shader?.let { return it }
+    /**
+     * @param scale 1 in the window; 0.5 inside the half-scale lens snapshot, so
+     *              the speckle is the same physical size in both.
+     */
+    fun shader(scale: Float = 1f): BitmapShader {
+        cache[scale]?.let { return it }
         val size = 96
         var s = 0x9E3779B97F4A7C15uL
         val px = IntArray(size * size)
@@ -175,11 +209,84 @@ object Grain {
         }
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         bmp.setPixels(px, 0, size, 0, 0, size, size)
-        return BitmapShader(bmp, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT).also { shader = it }
+        val sh = BitmapShader(bmp, Shader.TileMode.REPEAT, Shader.TileMode.REPEAT)
+        if (scale != 1f) {
+            sh.setLocalMatrix(Matrix().apply { setScale(scale, scale) })
+        }
+        return sh.also { cache[scale] = it }
     }
 }
 
 // ── 2. Glass ─────────────────────────────────────────────────────────────
+
+/**
+ * True when this view sits inside another pane.
+ *
+ * Apple's rule is *one* glass layer. Its own session is explicit: "always avoid
+ * glass on glass... when placing elements on top of Liquid Glass, avoid applying
+ * the material to both layers. Instead, use fills, transparency and vibrancy for
+ * the top elements to make them feel like a thin overlay that is part of the
+ * material." Walking the parent chain is how a view knows which of the two it is
+ * without every call site having to remember — and it is also why a chip stops
+ * refracting the sky through the card it is sitting on.
+ */
+internal fun View.nestedInGlass(): Boolean {
+    var p = parent
+    while (p != null) {
+        if (p is GlassCard || p is PillButton) return true
+        p = p.parent
+    }
+    return false
+}
+
+/**
+ * A flat pane — the vibrancy overlay that lives *on* the material.
+ *
+ * Fill, a whisper of vertical gradient, and the same hairline rim the lens
+ * draws for itself. No refraction, no lensing, no shadow: an overlay on a pane
+ * is not a second pane, and treating it as one is the single biggest reason a
+ * glass UI turns into a pile of white outlined slabs.
+ *
+ * `recessed` inverts the gradient and adds an inner shadow at the crown, so a
+ * recess reads as a depression in the pane rather than as a lighter chip on it.
+ */
+internal fun drawPane(
+    canvas: Canvas,
+    outline: Path,
+    rect: RectF,
+    fill: Int,
+    rimTop: Int,
+    rimBottom: Int,
+    hairline: Float,
+    paint: Paint,
+    recessed: Boolean = false,
+) {
+    paint.shader = null
+    paint.style = Paint.Style.FILL
+    paint.color = fill
+    canvas.drawPath(outline, paint)
+    if (recessed) {
+        paint.shader = LinearGradient(
+            0f, rect.top, 0f, rect.top + rect.height() * 0.34f,
+            0x3A060C22, 0x00060C22, Shader.TileMode.CLAMP,
+        )
+    } else {
+        paint.shader = LinearGradient(
+            0f, rect.top, 0f, rect.bottom,
+            Ink.mix(fill, Color.WHITE, 0.14f), Ink.mix(fill, Color.BLACK, 0.05f),
+            Shader.TileMode.CLAMP,
+        )
+    }
+    canvas.drawPath(outline, paint)
+
+    paint.shader = null
+    paint.style = Paint.Style.STROKE
+    paint.color = 0
+    Ink.rim(rect, rimTop, rimBottom, paint)
+    paint.strokeWidth = hairline
+    canvas.drawPath(outline, paint)
+    paint.style = Paint.Style.FILL
+}
 
 /**
  * A glass panel. Four overlapping layers, which is what separates this from a
@@ -202,7 +309,7 @@ class GlassCard(
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
-    private val clip = Path()
+    private val shape = Shape()
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE }
     private var accentRing = 0
     private var pressT = 0f
@@ -227,14 +334,10 @@ class GlassCard(
         super.addView(column, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         forwarding = true
-        if (lifted) {
-            elevation = dp(10f)
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, dp(radius))
-                }
-            }
-        }
+        // Deliberately no framework `elevation`. It paints the hard, near-black
+        // band Material wants and then `Ink.shadow` paints a soft one over it,
+        // which is two shadows under every card — the giveaway that a UI was
+        // assembled rather than designed. The painted penumbra is the shadow.
     }
 
     fun setAccentRing(color: Int) {
@@ -288,15 +391,6 @@ class GlassCard(
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
         super.onSizeChanged(w, h, oldw, oldh)
         rect.set(0f, 0f, w.toFloat(), h.toFloat())
-        clip.reset()
-        clip.addRoundRect(rect, dp(radius), dp(radius), Path.Direction.CW)
-        if (lifted) {
-            outlineProvider = object : ViewOutlineProvider() {
-                override fun getOutline(view: View, outline: Outline) {
-                    outline.setRoundRect(0, 0, view.width, view.height, dp(radius))
-                }
-            }
-        }
     }
 
     fun setPalette(p: Pal) {
@@ -305,94 +399,72 @@ class GlassCard(
     }
 
     override fun onDraw(canvas: Canvas) {
-        val r = dp(radius)
+        // One outline for every layer, so the body, the rim and the shadow can
+        // never disagree — and the corner is continuous, not quarter-circular.
+        val outline = shape.of(width, height, radius)
 
-        // 0. depth — drawn before the clip, because a shadow lives outside the
-        //    silhouette. Level 0 is a recess, so it sits *in* the scene instead
-        //    and gets an inner shadow further down.
-        //
-        //    Only when the lens is live: the painted fallback body is far more
-        //    translucent than refracted glass, so a shadow underneath it shows
-        //    straight through and the cards turn grey.
-        if (level > 0 && Glass.canRefract) {
+        // Depth sits outside the silhouette, so it is drawn before the clip.
+        if (level > 0 && !nestedInGlass() && Glass.canRefract) {
             val lift = if (lifted) dp(22f) else dp(if (level == 2) 15f else 11f)
-            Ink.shadow(canvas, rect, r, pal.shadow, lift, dp(if (lifted) 9f else 5f), paint)
+            Ink.shadow(canvas, outline, rect, pal.shadow, lift, dp(if (lifted) 9f else 5f), paint)
         }
 
         canvas.save()
-        canvas.clipPath(clip)
+        canvas.clipPath(outline)
 
-        // 1. body — a lens over the actual scene where the device can do it.
-        //    The palette's alpha *is* the body tint, and desat is how far the
-        //    lens pulls the backdrop toward neutral first. Together they are the
-        //    whole material: desaturate, then tint. Tinting alone is what made
-        //    the old light mode look like white stickers on blue paper.
         val base = when (level) {
             0 -> pal.well
             2 -> pal.panelRaised
             else -> pal.panel
         }
-        // A recess is a *darker* body over the backdrop; a panel is a lighter
-        // one. Sampling the scene and mixing the palette in gets both, but the
-        // well needs a real dose of its colour or it stops reading as recessed.
-        val refracted = Glass.fill(
-            this, canvas, rect, r, pal,
-            if (level == 0) Color.BLACK else base,
-            if (level == 0) (if (pal.dark) 0.22f else 0.10f) else Color.alpha(base) / 255f,
-            refract = when (level) { 0 -> 0.35f; 2 -> 1f; else -> 0.9f },
-            frost = if (level == 0) 0.45f else 0.65f,
-            // A recess should still show the scene's colour; a raised card is
-            // the most "material" of the three and neutralises hardest.
-            desat = when (level) { 0 -> pal.desat * 0.65f; 2 -> pal.desat * 1.1f; else -> pal.desat },
-        )
-        if (!refracted) {
-            val top = Ink.mix(base, Color.WHITE, 0.10f)
-            val bottom = Ink.mix(base, Color.BLACK, 0.06f)
-            Ink.vertical(top, bottom, rect, paint)
-            canvas.drawRect(rect, paint)
-        }
 
-        // 2. sheen — a whisper on top of the shader's own crown, not a second
-        //    full-strength highlight stacked onto it.
-        paint.shader = LinearGradient(
-            0f, rect.top, 0f, rect.top + rect.height() * 0.55f,
-            pal.sheen,                Ink.withAlpha(pal.sheen, 0f), Shader.TileMode.CLAMP,
-        )
-        canvas.drawRect(rect, paint)
-
-        // 2b. recessed panels also get an inner shadow at the crown
-        if (level == 0) {
-            paint.shader = LinearGradient(
-                0f, rect.top, 0f, rect.top + rect.height() * 0.30f,
-                0x3A060C22, 0x00060C22, Shader.TileMode.CLAMP,
+        var lensed = false
+        if (level > 0 && !nestedInGlass() && Glass.canRefract) {
+            lensed = Glass.fill(
+                this, canvas, outline, rect, pal,
+                tint = base,
+                radiusPx = dp(radius),
+                thickness = if (level == 2) 1.15f else 1f,
+                // Measured off the Mac: a big panel's own edge carries no
+                // highlight at all, so a card gets almost none. Held back on
+                // purpose — this is the term that turns glass into a white
+                // outline the moment it is turned up.
+                spec = if (level == 2) 0.30f else 0.16f,
             )
-            canvas.drawRect(rect, paint)
+        }
+        if (!lensed) {
+            // A recess, a nested overlay, or a device without AGSL. All three
+            // are a flat pane: the material is already accounted for by the
+            // layer underneath.
+            drawPane(
+                canvas, outline, rect,
+                if (level == 0) pal.well else base,
+                pal.rimTop, pal.rimBottom,
+                if (accentRing != 0) dp(1.6f) else max(1f, Density.d),
+                paint,
+                recessed = level == 0,
+            )
         }
 
-        // 3. selection wash. Kept light on purpose: a heavy accent fill behind
-        //    dark label text is unreadable in light mode, so the tint hints and
-        //    the rim below does the announcing.
+        // The selection wash belongs *to* the glass, so it is drawn under the
+        // clip rather than smeared past the silhouette.
         if (accentRing != 0) {
             paint.shader = null
-            paint.color = Ink.withAlpha(accentRing, (if (pal.dark) 0.14f else 0.10f) + 0.10f * pressT)
-            canvas.drawRect(rect, paint)
+            paint.color = Ink.withAlpha(accentRing, (if (pal.dark) 0.12f else 0.09f) + 0.10f * pressT)
+            canvas.drawPath(outline, paint)
+            Ink.glow(rect.centerX(), rect.centerY(), max(rect.width(), rect.height()) * 0.7f,
+                Ink.withAlpha(accentRing, 0.10f), paint)
+            canvas.drawPath(outline, paint)
         }
         canvas.restore()
 
-        stroke.color = 0
-        Ink.rim(rect, pal.rimTop, pal.rimBottom, stroke)
-        stroke.strokeWidth = if (accentRing != 0) dp(1.6f) else max(1f, Density.d)
-        val inset = stroke.strokeWidth / 2f
-        canvas.drawRoundRect(
-            RectF(rect.left + inset, rect.top + inset, rect.right - inset, rect.bottom - inset),
-            r - inset, r - inset, stroke,
-        )
-
-        if (accentRing != 0) {
-            paint.shader = null
-            Ink.glow(rect.centerX(), rect.centerY(), max(rect.width(), rect.height()) * 0.7f,
-                Ink.withAlpha(accentRing, 0.11f), paint)
-            canvas.drawRect(rect, paint)
+        // The lens paints its own hairline inside the material; a flat pane
+        // needs one drawn for it.
+        if (!lensed) {
+            stroke.color = 0
+            Ink.rim(rect, pal.rimTop, pal.rimBottom, stroke)
+            stroke.strokeWidth = if (accentRing != 0) dp(1.6f) else max(1f, Density.d)
+            canvas.drawPath(outline, stroke)
         }
     }
 
@@ -525,6 +597,7 @@ class IconTile(
     val iconView = IconView(ctx, icon, sizeDp * 0.5f, tint, 1.7f)
     private val bg = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
+    private val shape = Shape()
     private var fillColor = fill
     private val radius = sizeDp * 0.32f
 
@@ -554,28 +627,16 @@ class IconTile(
     }
 
     override fun onDraw(canvas: Canvas) {
-        val r = dp(radius)
-        // A tile is small, so it is the least "material" surface in the app:
-        // it keeps more of the scene's colour and stays nearly transparent.
-        // The old 72%-white light value made every lane icon a white chip.
-        val body = if (fillColor != 0) fillColor else Ink.withAlpha(Color.WHITE, if (pal.dark) 0.12f else 0.30f)
-        val refracted = Glass.fill(
-            this, canvas, rect, r, pal, body, Color.alpha(body) / 255f,
-            refract = 0.75f, frost = 0.5f, desat = pal.desat * 0.55f,
+        val outline = shape.of(width, height, radius)
+        // A glyph well sitting *on* a pane. A lens here would refract the scene
+        // straight through the card it is supposed to be resting on, which is
+        // exactly how these read as holes punched in their parents.
+        val body = if (fillColor != 0) fillColor else Ink.withAlpha(Color.WHITE, if (pal.dark) 0.10f else 0.24f)
+        drawPane(
+            canvas, outline, rect, body,
+            Ink.withAlpha(Color.WHITE, if (pal.dark) 0.13f else 0.30f), pal.rimBottom,
+            max(1f, Density.d), bg,
         )
-        if (!refracted) {
-            bg.color = body
-            canvas.drawRoundRect(rect, r, r, bg)
-        }
-        bg.shader = null
-        bg.color = Ink.withAlpha(Color.WHITE, if (pal.dark) 0.10f else 0.34f)
-        bg.style = Paint.Style.STROKE
-        bg.strokeWidth = max(1f, Density.d)
-        canvas.drawRoundRect(
-            RectF(rect.left + 0.5f, rect.top + 0.5f, rect.right - 0.5f, rect.bottom - 0.5f),
-            r, r, bg,
-        )
-        bg.style = Paint.Style.FILL
     }
 }
 // ── 3. The ball ──────────────────────────────────────────────────────────
@@ -598,6 +659,7 @@ class BallView(ctx: Context, var pal: Pal) : View(ctx) {
         private set
 
     private var phase = 0f
+    private var lastFrame = 0L
     private var ambient: ValueAnimator? = null
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val arcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -629,7 +691,15 @@ class BallView(ctx: Context, var pal: Pal) : View(ctx) {
             addUpdateListener {
                 phase = it.animatedValue as Float
                 translationY = -dp(3f) * (0.5f + 0.5f * kotlin.math.sin(phase * 2 * Math.PI).toFloat())
-                invalidate()
+                // The bob and the breath are a 3.3 s sine. They do not need 60
+                // fps — and every frame here makes the card this ball sits in
+                // re-run its whole lens, so an unhurried animation is not a
+                // nicety, it is most of the app's frame budget.
+                val now = System.currentTimeMillis()
+                if (now - lastFrame > 50) {
+                    lastFrame = now
+                    invalidate()
+                }
             }
             start()
         }
@@ -970,6 +1040,7 @@ class PillButton(
 
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
+    private val shape = Shape()
     private var busy = false
     private var island: GlassCard? = null
 
@@ -1001,13 +1072,8 @@ class PillButton(
         addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
             gravity = Gravity.CENTER
         })
-        elevation = if (variant == FILLED || variant == DANGER) dp(8f) else 0f
-        outlineProvider = object : ViewOutlineProvider() {
-            override fun getOutline(view: View, outline: Outline) {
-                outline.setRoundRect(0, 0, view.width, view.height, view.height / 2f)
-            }
-        }
-        clipToOutline = false
+        // The painted penumbra in onDraw is the shadow; a framework elevation
+        // on top of it would double every button.
     }
 
     private fun tint(): Int = when (variant) {
@@ -1053,62 +1119,50 @@ class PillButton(
     }
 
     override fun onDraw(canvas: Canvas) {
-        val r = height / 2f
-        val base = when (variant) {
-            FILLED -> pal.accent
-            DANGER -> pal.bad
-            else -> Ink.withAlpha(pal.textPrimary, if (pal.dark) 0.10f else 0.07f)
-        }
-        if (variant == FILLED || variant == DANGER) {
-            // The accent is a solid surface: it owns its colour. Apple's filled
-            // button is nearly flat — a full white-to-black ramp across it reads
-            // as injection-moulded plastic, which is what this was doing.
-            Ink.shadow(canvas, rect, r, pal.shadow, dp(9f), dp(4f), paint)
-            paint.shader = null
-            paint.color = base
-            canvas.drawRoundRect(rect, r, r, paint)
-            paint.shader = LinearGradient(
-                0f, 0f, 0f, height.toFloat(),
-                Ink.withAlpha(Color.WHITE, 0.13f), Ink.withAlpha(Color.BLACK, 0.09f),
-                Shader.TileMode.CLAMP,
-            )
-            canvas.drawRoundRect(rect, r, r, paint)
-        } else {
-            // Ghost and outline pills are glass: they refract what is behind.
-            val refracted = Glass.fill(
-                this, canvas, rect, r, pal, base, Color.alpha(base) / 255f,
-                refract = 0.9f, frost = 0.55f, desat = pal.desat * 0.7f,
-            )
-            if (!refracted) {
-                paint.shader = null
-                paint.color = base
-                canvas.drawRoundRect(rect, r, r, paint)
-            }
+        val outline = shape.ofPx(width, height, height / 2f)
+        val filled = variant == FILLED || variant == DANGER
+        val accentCol = if (variant == DANGER) pal.bad else pal.accent
+
+        // The accent arrives as a *tint*, never as paint. Apple is blunt about
+        // this one: a button using a solid fill "is completely opaque and breaks
+        // the visual character of Liquid Glass", where the tinted version stays
+        // transparent and grounded in its environment. So the fill is the accent
+        // at eighty-odd percent — enough to read as the primary action, thin
+        // enough that the pane underneath still shows through it.
+        val fill = when (variant) {
+            FILLED, DANGER -> Ink.withAlpha(accentCol, if (pal.dark) 0.78f else 0.84f)
+            OUTLINE -> Ink.withAlpha(pal.textPrimary, if (pal.dark) 0.05f else 0.04f)
+            else -> Ink.withAlpha(pal.textPrimary, if (pal.dark) 0.09f else 0.06f)
         }
 
-        // sheen + rim, so even a solid button reads as a physical thing
-        paint.shader = LinearGradient(
-            0f, 0f, 0f, height * 0.55f,
-            Ink.withAlpha(Color.WHITE, if (variant == FILLED) 0.20f else 0.18f),
-            Ink.withAlpha(Color.WHITE, 0f), Shader.TileMode.CLAMP,
-        )
-        canvas.drawRoundRect(rect, r, r, paint)
+        Ink.shadow(canvas, outline, rect, pal.shadow, dp(if (filled) 10f else 7f), dp(4f), paint)
 
-        paint.shader = null
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = if (variant == OUTLINE) dp(1.5f) else max(1f, Density.d)
-        paint.color = when (variant) {
-            OUTLINE -> Ink.withAlpha(pal.accent, 0.75f)
-            FILLED, DANGER -> Ink.withAlpha(Color.WHITE, 0.22f)
-            else -> pal.rimTop
+        var lensed = false
+        if (!nestedInGlass() && Glass.canRefract) {
+            lensed = Glass.fill(
+                this, canvas, outline, rect, pal,
+                tint = fill,
+                radiusPx = height / 2f,
+                thickness = 0.9f,
+                desat = pal.desat * 0.7f,
+                // A pill turns over faster at its rim than a panel does, so it
+                // catches the light — this is the surface the specular is for.
+                spec = if (filled) 1f else 0.85f,
+            )
         }
-        canvas.drawRoundRect(
-            RectF(rect.left + 0.75f, rect.top + 0.75f, rect.right - 0.75f, rect.bottom - 0.75f),
-            r, r, paint,
-        )
-        paint.style = Paint.Style.FILL
+        if (!lensed) {
+            drawPane(
+                canvas, outline, rect, fill,
+                Ink.withAlpha(Color.WHITE, if (filled) 0.28f else 0.22f),
+                if (variant == OUTLINE) Ink.withAlpha(pal.accent, 0.55f) else pal.rimBottom,
+                if (variant == OUTLINE) dp(1.5f) else max(1f, Density.d),
+                paint,
+            )
+        }
 
         if (busy) {
+            paint.shader = null
+            paint.style = Paint.Style.FILL
             paint.color = Ink.withAlpha(tint(), 0.5f)
             canvas.drawCircle(width - dp(22f), height / 2f, dp(3.5f), paint)
         }
@@ -1127,18 +1181,14 @@ class IconButton(
     val iconView = IconView(ctx, icon, sizeDp * 0.46f, if (tint != 0) tint else pal.textPrimary, 1.75f)
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val rect = RectF()
+    private val circle = Path()
 
     init {
         setWillNotDraw(false)
         addView(iconView, LayoutParams(dpi(sizeDp * 0.46f), dpi(sizeDp * 0.46f)).apply {
             gravity = Gravity.CENTER
         })
-        elevation = dp(6f)
-        outlineProvider = object : ViewOutlineProvider() {
-            override fun getOutline(view: View, outline: Outline) {
-                outline.setOval(0, 0, view.width, view.height)
-            }
-        }
+        // No framework elevation: `Ink.shadow` is the only shadow in this file.
     }
 
     fun tint(color: Int) {
@@ -1155,28 +1205,19 @@ class IconButton(
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         rect.set(0f, 0f, w.toFloat(), h.toFloat())
+        circle.reset()
+        circle.addOval(rect, Path.Direction.CW)
     }
 
     override fun onDraw(canvas: Canvas) {
-        val body = Ink.withAlpha(Color.WHITE, if (pal.dark) 0.12f else 0.28f)
-        val refracted = Glass.fill(
-            this, canvas, rect, rect.width() / 2f, pal, body, Color.alpha(body) / 255f,
-            refract = 0.8f, frost = 0.5f, desat = pal.desat * 0.55f,
+        // A round control on the pane. Same rule as the tiles: a fill, never a
+        // second pane.
+        drawPane(
+            canvas, circle, rect,
+            Ink.withAlpha(Color.WHITE, if (pal.dark) 0.11f else 0.24f),
+            pal.rimTop, pal.rimBottom,
+            max(1f, Density.d), paint,
         )
-        if (!refracted) {
-            paint.shader = null
-            paint.color = body
-            canvas.drawOval(rect, paint)
-        }
-        Ink.vertical(Ink.withAlpha(Color.WHITE, if (pal.dark) 0.12f else 0.55f),
-            Ink.withAlpha(Color.WHITE, 0f), rect, paint)
-        canvas.drawOval(rect, paint)
-        paint.shader = null
-        paint.style = Paint.Style.STROKE
-        paint.strokeWidth = max(1f, Density.d)
-        paint.color = pal.rimTop
-        canvas.drawOval(RectF(rect.left + 0.5f, rect.top + 0.5f, rect.right - 0.5f, rect.bottom - 0.5f), paint)
-        paint.style = Paint.Style.FILL
     }
 }
 

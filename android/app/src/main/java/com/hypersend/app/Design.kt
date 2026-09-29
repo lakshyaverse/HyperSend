@@ -17,6 +17,7 @@ import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import android.view.animation.PathInterpolator
 import android.widget.TextView
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 // HyperSend for Android — the design system.
@@ -63,13 +64,19 @@ class Pal(
     val bloomSpread: Float,
     // glass
     /**
-     * How far the material pulls the backdrop toward neutral grey.
+     * How far the material pulls the backdrop toward neutral.
      *
-     * This is the single most "Liquid Glass" number in the file. Apple's
-     * material does not simply lighten what is behind it — it *desaturates* it,
-     * which is why the Mac's blue sky reads as the neutral #CEDADC behind a
-     * light panel. Tinting white without desaturating is what produced the
-     * chalky, blocky cards the phone used to show.
+     * The one number that decides whether a pane reads as glass or as a white
+     * sticker, and the only one that can actually be measured. Sampling across
+     * a panel's edge on the Mac — the one place the backdrop and the pane sit
+     * side by side — the material takes its backdrop a *fifth* of the way to
+     * neutral, in both light and dark:
+     *
+     *     light  sky #BED0DD -> pane #C7D5E0    (chroma 0.140 -> 0.112)
+     *     dark   sky #262D4A -> pane #455072    (chroma 0.493 -> 0.395)
+     *
+     * Guessing this number is how you end up with chalky cards: too little and
+     * the pane is just the sky, too much and every surface turns to grey mush.
      */
     val desat: Float,
     val panel: Int, val panelRaised: Int, val well: Int, val rail: Int,
@@ -84,13 +91,12 @@ class Pal(
 )
 
 /**
- * Dark mode, sampled off the Mac window on a 9-point grid.
+ * Dark mode, sampled off the Mac window.
  *
  * The backdrop is not flat: it runs #2F3856 at the top edge down to #191E37 at
- * the bottom, with a soft indigo bloom up the left. A panel over it reads
- * #4E5577 — which is white at ~18% over that sky, not the 12% the old values
- * used. The old sky bottom (#272D45) was also a good deal too light, so the
- * panels never separated from the backdrop and the whole window went to mush.
+ * the bottom, with a soft indigo bloom up the left. Measured across a panel's
+ * edge, the pane lifts its backdrop by 33 luma and pulls its chroma down by a
+ * fifth — which is white, slightly cooled, at 16%.
  */
 object ThemeDark {
     val pal = Pal(
@@ -103,18 +109,20 @@ object ThemeDark {
         bloomC = 0x1CFFFFFF,
         grainAlpha = 10,
         bloomSpread = 1f,
-        desat = 0.16f,
-        panel = 0x2EFFFFFF,
-        panelRaised = 0x3AFFFFFF,
-        well = 0x1C000000,
+        desat = 0.20f,
+        // Cool white at 16% — the measured lift. The coolness is not decorative:
+        // a plain white overlay leaves the pane short in blue against the Mac.
+        panel = 0x29F2F6FF,
+        panelRaised = 0x33F2F6FF,
+        well = 0x1F000000,
         rail = 0x1FFFFFFF,
-        rimTop = 0x42FFFFFF,
-        rimBottom = 0x0AFFFFFF,
+        // A whisper, for the flat overlays. The real material paints no rim at
+        // all: sampling straight down through a Mac panel's top edge is a
+        // smooth monotone ramp with no overshoot anywhere in it.
+        rimTop = 0x2BFFFFFF,
+        rimBottom = 0x0EFFFFFF,
         shadow = 0x66040A1E,
-        // The shader lays its own crown across every surface now, so the flat
-        // painted sheen on top of it is only a hint — otherwise they stack and
-        // the top third of every card turns white.
-        sheen = 0x14FFFFFF,
+        sheen = 0x0CFFFFFF,
         textPrimary = 0xFFF2F4FA.toInt(),
         textSecondary = 0xFFAEB6CE.toInt(),
         textDim = 0xFF7C84A0.toInt(),
@@ -141,9 +149,10 @@ object ThemeDark {
  * neutral. No amount of white tint can produce that; you have to desaturate
  * first and lighten second, which is what [Pal.desat] does.
  *
- * Panels are therefore roughly 10% white over a 60%-desaturated backdrop, where
- * they used to be 36% white over a crisp one — the difference between glass and
- * a white sticker. Accent is Apple's #007AFF.
+ * Across a panel's edge the pane takes #BED0DD to #C7D5E0: chroma 0.140 down to
+ * 0.112, luma 204 up to 211. That is a fifth of the way to neutral, then 12.5%
+ * white — and it is the whole reason these panels read as glass rather than as
+ * white stickers. Accent is Apple #007AFF.
  */
 object ThemeLight {
     val pal = Pal(
@@ -156,17 +165,19 @@ object ThemeLight {
         bloomC = 0x26FFFFFF,
         grainAlpha = 11,
         bloomSpread = 0.62f,
-        desat = 0.60f,
-        // Warm white: the material's own cast is a hair warm, and it is what
-        // pulls the blue of the sky back out of the panel.
-        panel = 0x1AFFF9F2.toInt(),
-        panelRaised = 0x24FFF9F2.toInt(),
-        well = 0x12707990,
+        desat = 0.20f,
+        panel = 0x20FFFFFF,
+        panelRaised = 0x29FFFFFF,
+        well = 0x14000000,
         rail = 0x38FFFFFF,
-        rimTop = 0xF2FFFFFF.toInt(),
-        rimBottom = 0x2EFFFFFF,
+        // A 1 px hairline for definition, not an outline. The old rim was 95%
+        // white and, with the sheen cone stacked on top of it, drew a blown-out
+        // opaque halo around every card — the single most "not glass" thing in
+        // the app, and the reason the edges read as painted on.
+        rimTop = 0x3DFFFFFF,
+        rimBottom = 0x14FFFFFF,
         shadow = 0x1F1A2A4D,
-        sheen = 0x24FFFFFF,
+        sheen = 0x0CFFFFFF,
         textPrimary = 0xFF14161C.toInt(),
         textSecondary = 0xFF53596B.toInt(),
         textDim = 0xFF868C9E.toInt(),
@@ -236,6 +247,109 @@ object Tok {
 
     /** Content gutter. */
     const val GUTTER = 18f
+}
+
+// ── Continuous corners ───────────────────────────────────────────────────
+
+/**
+ * Continuous corners — the curve Apple calls `.continuous`, and the single
+ * biggest reason a rounded rectangle reads as Apple rather than as Android.
+ *
+ * A plain rounded rect is a quarter circle of radius R: the curve *begins* R
+ * points in from the corner. Apple's continuous corner keeps a curve that
+ * looks the same radius but starts turning much further out along each edge,
+ * so the straight runs are shorter and the corner is a longer, flatter sweep.
+ * That is why the Mac's panels look soft where a round-rect looks punched.
+ *
+ * One cubic per corner, tangent to both edges:
+ *
+ *   - the turn begins at `EXTENT * R` from the corner, EXTENT = 1.528 — the
+ *     factor Apple's own continuous corners use;
+ *   - its control points sit `FULLNESS` of that span, FULLNESS = 0.822, which
+ *     puts the curve's 45° point exactly 0.2929 R from the corner. That is
+ *     precisely where a circular corner of radius R would sit, so the corner
+ *     keeps the *visual* radius it was asked for while gaining the longer,
+ *     softer sweep. Solve `p/2 - 3a/8 = R(1 - 1/√2)` for a to get the 0.822.
+ *
+ * A capsule is the exception: when the radius reaches half the short side the
+ * ends must be true semicircles, so it switches to the classic circle
+ * approximation instead.
+ */
+object Corners {
+
+    /** Where the turn begins, as a multiple of the radius. */
+    private const val EXTENT = 1.528f
+
+    /** Corner fullness for an ordinary card — see the object note. */
+    private const val FULLNESS = 0.822f
+
+    /** The circle approximation, for ends that have to be semicircles. */
+    private const val ROUND = 0.5523f
+
+    /** Rebuilds [out] as the continuous-corner outline of this box. */
+    fun path(out: Path, l: Float, t: Float, r: Float, b: Float, radius: Float): Path {
+        out.reset()
+        val w = r - l
+        val h = b - t
+        if (w <= 0f || h <= 0f) return out
+
+        val half = min(w, h) * 0.5f
+        val rad = radius.coerceIn(0f, half)
+        val span = min(rad * EXTENT, half)
+        if (span <= 0.01f) {
+            out.addRect(l, t, r, b, Path.Direction.CW)
+            return out
+        }
+        // A radius that wants to reach past the short side is a capsule, not a
+        // squircle: keep the fuller sweep only where there is room for it.
+        val k = if (rad * EXTENT > half) ROUND else FULLNESS
+        val a = span * k
+
+        // Clockwise from the top edge.
+        out.moveTo(l + span, t)
+        out.lineTo(r - span, t)
+        out.cubicTo(r - span + a, t, r, t + span - a, r, t + span)
+        out.lineTo(r, b - span)
+        out.cubicTo(r, b - span + a, r - span + a, b, r - span, b)
+        out.lineTo(l + span, b)
+        out.cubicTo(l + span - a, b, l, b - span + a, l, b - span)
+        out.lineTo(l, t + span)
+        out.cubicTo(l, t + span - a, l + span - a, t, l + span, t)
+        out.close()
+        return out
+    }
+}
+
+/**
+ * A cached silhouette.
+ *
+ * Every glass surface outlines itself several times per frame — the lens, the
+ * sheen, the rim, the shadow — and a continuous corner is four cubics rather
+ * than a cheap `drawRoundRect`. Rebuilding it per draw would allocate a path
+ * per layer per frame, so this keeps one and only rebuilds when the size or
+ * radius actually moves.
+ */
+class Shape {
+
+    private val built = Path()
+    private var keyW = -1
+    private var keyH = -1
+    private var keyR = -1f
+
+    /** The outline of a view of this size, with its radius in dp. */
+    fun of(w: Int, h: Int, radiusDp: Float): Path = build(w, h, dpi(radiusDp).toFloat())
+
+    /** Same, for surfaces whose radius is already half their height — pills. */
+    fun ofPx(w: Int, h: Int, radiusPx: Float): Path = build(w, h, radiusPx)
+
+    private fun build(w: Int, h: Int, radiusPx: Float): Path {
+        if (w == keyW && h == keyH && radiusPx == keyR) return built
+        Corners.path(built, 0f, 0f, w.toFloat(), h.toFloat(), radiusPx)
+        keyW = w
+        keyH = h
+        keyR = radiusPx
+        return built
+    }
 }
 
 /** Type scale, in sp. Mobile is one step up from the Mac's desktop sizes. */
@@ -467,12 +581,17 @@ object Ink {
     }
 
     /**
-     * A soft penumbra under a rounded rect.
+     * A soft penumbra under a silhouette.
      *
      * Framework `elevation` throws the hard, near-black band Material wants;
      * glass floats on something much wider and weaker. This stacks concentric
-     * round rects whose alpha falls off quadratically, which approximates a
-     * Gaussian closely enough to read as a real shadow.
+     * copies of the outline whose alpha falls off quadratically, which
+     * approximates a Gaussian closely enough to read as a real shadow.
+     *
+     * Takes the outline rather than a rect so the penumbra follows a continuous
+     * corner instead of cutting across it — a square-ish shadow under a soft
+     * corner is exactly the kind of mismatch that reads as "off" without
+     * anyone being able to say why.
      *
      * Deliberately no BlurMaskFilter: on a hardware-accelerated canvas it is
      * silently ignored for shapes, so the "blur" would collapse into exactly
@@ -480,29 +599,34 @@ object Ink {
      */
     fun shadow(
         canvas: Canvas,
-        rect: RectF,
-        radius: Float,
+        outline: Path,
+        bounds: RectF,
         color: Int,
         spread: Float,
         dy: Float,
         paint: Paint,
     ) {
         val peak = Color.alpha(color) / 255f
-        if (peak <= 0f || spread <= 0f) return
+        val w = bounds.width()
+        val h = bounds.height()
+        if (peak <= 0f || spread <= 0f || w <= 1f || h <= 1f) return
         val steps = 10
+        val cx = bounds.centerX()
+        val cy = bounds.centerY()
         val wasShader = paint.shader
         paint.shader = null
         for (i in steps downTo 1) {
             val t = i / steps.toFloat()
             val grow = spread * (t * t)
             paint.color = withAlpha(color, peak * (1f - t) * 0.30f)
-            canvas.drawRoundRect(
-                RectF(
-                    rect.left - grow, rect.top - grow * 0.55f + dy,
-                    rect.right + grow, rect.bottom + grow + dy,
-                ),
-                radius + grow * 0.7f, radius + grow * 0.7f, paint,
-            )
+            // Grow in place: scaling about the centre widens the penumbra
+            // without moving the silhouette, so the shadow stays concentric.
+            canvas.save()
+            canvas.translate(cx, cy + dy)
+            canvas.scale((w + grow * 2f) / w, (h + grow * 2f) / h)
+            canvas.translate(-cx, -cy)
+            canvas.drawPath(outline, paint)
+            canvas.restore()
         }
         paint.shader = wasShader
     }
